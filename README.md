@@ -23,7 +23,7 @@
 ## 2. 目录结构
 
 ```
-PowerGuardDisplay.sln
+PowerGuardDisplay.slnx
 global.json
 publish.ps1                      发布脚本
 src/
@@ -52,7 +52,7 @@ tests/
 ## 3. 构建与测试
 
 ```powershell
-dotnet build PowerGuardDisplay.sln -c Release
+dotnet build PowerGuardDisplay.slnx -c Release
 dotnet test  tests/PowerGuard.Core.Tests -c Release
 ```
 
