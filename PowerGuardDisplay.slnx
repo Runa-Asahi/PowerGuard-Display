@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PowerGuard.App/PowerGuard.App.csproj" />
+    <Project Path="src/PowerGuard.Core/PowerGuard.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PowerGuard.Core.Tests/PowerGuard.Core.Tests.csproj" />
+  </Folder>
+</Solution>
