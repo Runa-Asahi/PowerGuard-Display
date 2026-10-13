@@ -63,8 +63,9 @@ public sealed class RecoveryState
     public DateTimeOffset? LastAttemptAt { get; set; }
     public int AttemptCount { get; set; }
     public string? LastError { get; set; }
-    /// <summary>触发原因（v2 新增，旧文件缺省为 PowerLoss）。</summary>
-    public TriggerReason TriggerReason { get; set; } = TriggerReason.PowerLoss;
+    /// <summary>触发原因（v2 新增，旧文件缺省为 AcToBattery）。</summary>
+    [System.Text.Json.Serialization.JsonConverter(typeof(TriggerReasonConverter))]
+    public TriggerReason TriggerReason { get; set; } = TriggerReason.AcToBattery;
     /// <summary>最近一次关机前尝试的时间与结果（v2 新增，仅供诊断）。</summary>
     public DateTimeOffset? LastShutdownAttemptAt { get; set; }
     public string? LastShutdownAttemptResult { get; set; }

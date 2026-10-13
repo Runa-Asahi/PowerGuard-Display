@@ -11,10 +11,13 @@ public sealed class FakeClock : IClock
 /// <summary>立即完成并推进假时钟。</summary>
 public sealed class FakeDelay(FakeClock clock) : IDelay
 {
+    /// <summary>每次等待时调用（用于在等待窗口内注入事件）。</summary>
+    public Action<TimeSpan>? OnDelay { get; set; }
     public Task Delay(TimeSpan d, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         clock.Advance(d);
+        OnDelay?.Invoke(d);
         return Task.CompletedTask;
     }
 }
@@ -27,11 +30,13 @@ public sealed class FakeDisplay : IDisplayTopologyProvider, IDisplaySwitcher
     public bool LaunchFails { get; set; }
     public bool SwitchHasNoEffect { get; set; }
     public bool QueryFails { get; set; }
+    public int QueryCount { get; private set; }
     public List<DisplayMode> Launches { get; } = new();
     public Action<DisplayMode>? BeforeLaunch { get; set; }
 
     public DisplayTopology Query()
     {
+        QueryCount++;
         if (QueryFails) return DisplayTopology.Failed("模拟失败");
         if (Override is not null) return Override;
         var mode = Mode;
@@ -76,13 +81,15 @@ public sealed class Harness
     public FakeDisplay Display { get; } = new();
     public MemoryStateStore Store { get; } = new();
     public MemoryLogger Log { get; } = new();
-    public AppSettings Settings { get; set; } = new() { StabilitySeconds = 15, RecoveryTimeoutMinutes = 10, RetryIntervalSeconds = 20, MaxRetries = 2 };
+    public AppSettings Settings { get; set; } = new() { TriggerMode = TriggerMode.Compatibility, StabilitySeconds = 15, RecoveryTimeoutMinutes = 10, RetryIntervalSeconds = 20, MaxRetries = 2 };
     public RecoveryCoordinator C { get; private set; }
 
     public Harness() => C = Create();
 
+    public FakeDelay Delay { get; private set; } = null!;
+
     public RecoveryCoordinator Create() =>
-        C = new RecoveryCoordinator(() => Settings, Store, Display, Display, Clock, new FakeDelay(Clock), Log);
+        C = new RecoveryCoordinator(() => Settings, Store, Display, Display, Clock, Delay = new FakeDelay(Clock), Log);
 
     /// <summary>模拟 n 秒，每 2 秒一次 Tick（与真实低频轮询一致）。</summary>
     public async Task RunFor(int seconds)

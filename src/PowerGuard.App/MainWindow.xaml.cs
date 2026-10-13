@@ -108,8 +108,14 @@ public partial class MainWindow : Window
         ModeText.Text = t.QuerySucceeded ? DisplayModeText.Of(t.Mode) : "未知（查询失败）";
         InternalText.Text = !t.QuerySucceeded ? "未知" : t.InternalActive ? "活动中" : t.InternalPresent ? "已关闭（未显示）" : "未检测到";
         InternalText.Foreground = t.QuerySucceeded && !t.InternalActive ? B("Warn") : B("TextPrimary");
-        ExternalText.Text = !t.QuerySucceeded ? "未知" : t.ExternalAvailableCount == 0 ? "未报告可用路径" : t.ExternalActiveCount > 0 ? $"路径活动中（{t.ExternalActiveCount}）" : $"路径可用 · 未启用（{t.ExternalAvailableCount}）";
-        TriggerModeText.Text = st.TriggerMode == TriggerMode.Recommended ? "推荐（断电 / 显示路径）" : "兼容（仅断电）";
+        ExternalText.Text = !t.QuerySucceeded ? "未知（查询失败）" : $"{t.ExternalActiveCount} 条";
+        ExternalAvailText.Text = !t.QuerySucceeded ? "未知（查询失败）" : $"{t.ExternalAvailableCount} 个";
+        LostConfirmText.Text = snap.ExternalLostSince is { } lsc ? $"确认中（剩约 {Math.Max(0, st.ExternalLostConfirmSeconds - (int)(DateTimeOffset.Now - lsc).TotalSeconds)} 秒）" : "无";
+        LostConfirmText.Foreground = snap.ExternalLostSince is null ? B("TextPrimary") : B("Warn");
+        MarkerExistsText.Text = snap.Marker is null ? "无" : "有（未完成）";
+        MarkerExistsText.Foreground = snap.Marker is null ? B("TextPrimary") : B("Warn");
+        ShutdownTryText.Text = st.TryPreferredModeOnShutdown ? "已开启" : "未开启";
+        TriggerModeText.Text = st.TriggerMode == TriggerMode.Recommended ? "推荐" : "兼容";
         TriggerReasonText.Text = snap.LastTriggerReason is { } tr ? $"{DisplayModeText.Of(tr)}" + (snap.LastTriggerAt is { } ta ? $" · {ta:MM-dd HH:mm}" : "") : "本次运行未触发";
         AutoRestoreText.Text = st.AutoRestoreOnPowerReturn ? "已启用" : "已禁用";
         FlowText.Text = DisplayModeText.Of(snap.Status);
@@ -132,21 +138,21 @@ public partial class MainWindow : Window
                 else if (snap.ExternalStableSince is { } since)
                 {
                     var left = st.StabilitySeconds - (int)(DateTimeOffset.Now - since).TotalSeconds;
-                    detail = $"Windows 已检测到外接显示路径，稳定计时中，约 {Math.Max(0, left)} 秒后恢复。";
+                    detail = $"Windows 检测到外接显示路径，稳定计时中，约 {Math.Max(0, left)} 秒后尝试恢复（不代表显示器已亮屏）。";
                 }
                 else detail = snap.Marker?.TriggerReason == TriggerReason.ExternalDisplayLost
-                    ? "因外接显示路径消失而切回内屏，等待 Windows 重新报告外接路径可用（不设超时）。"
-                    : "已来电，等待 Windows 报告外接显示路径可用。";
+                    ? "因外接活动显示路径消失而切回内屏，等待 Windows 检测到外接显示路径可用（受恢复超时限制）。"
+                    : "已来电，等待 Windows 检测到外接显示路径可用。";
                 dot = B("Warn"); break;
             case RecoveryStatus.Normal:
                 title = protection == "已启用" ? "保护已就绪" : "保护未启用";
                 detail = st.TriggerMode == TriggerMode.Recommended
-                    ? $"市电转电池或外接显示路径消失时会切回笔记本内屏；条件恢复后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。"
-                    : $"市电转电池时会切回笔记本内屏；来电后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。";
+                    ? $"市电转电池且外接活动路径消失、或外接活动路径单独消失时切回笔记本内屏；条件恢复后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。"
+                    : $"市电转电池或外接活动路径消失时切回笔记本内屏；条件恢复后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。";
                 if (snap.ExternalLostSince is { } ls)
                 {
                     var left = st.ExternalLostConfirmSeconds - (int)(DateTimeOffset.Now - ls).TotalSeconds;
-                    title = "外接显示路径消失，确认中";
+                    title = "外接活动显示路径消失，确认中";
                     detail = $"若约 {Math.Max(0, left)} 秒内路径没有重新出现，将切回笔记本内屏。";
                 }
                 dot = protection == "已启用" ? B("Ok") : B("Warn"); break;

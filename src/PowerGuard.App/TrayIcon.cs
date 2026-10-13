@@ -63,7 +63,7 @@ public sealed class TrayIcon : IDisposable
         if (_lastStatus != null && _lastStatus != s)
         {
             if (s == RecoveryStatus.WaitingForExternal && _lastStatus == RecoveryStatus.SwitchingToInternal)
-                Notify(snap.Marker?.TriggerReason == TriggerReason.ExternalDisplayLost ? "外接显示路径消失" : "检测到断电",
+                Notify(snap.Marker?.TriggerReason == TriggerReason.ExternalDisplayLost ? "外接活动显示路径消失" : "检测到断电",
                     "已切回笔记本内屏，条件恢复且外接显示路径稳定可用后会尝试恢复。");
             else if (s == RecoveryStatus.Normal && _lastStatus == RecoveryStatus.RestoringPreferredMode)
                 Notify("显示模式已恢复", "Windows 已启用首选显示模式。");

@@ -10,15 +10,40 @@ public enum PowerSource { Unknown, Ac, Battery }
 public enum DisplayMode { Unknown, Internal, External, Extend, Clone }
 
 /// <summary>
-/// 触发方式。Recommended：市电转电池 或 “外接显示路径消失”（确认窗口后）都会触发保护；
-/// Compatibility：只响应市电转电池（第一版行为）。
+/// 触发方式（两种模式都启用“外接活动显示路径消失”检测）：
+/// Recommended：确认市电转电池后再查询拓扑，只有外接活动路径也已消失才保护；外接仍活动只记录。
+/// Compatibility：确认市电转电池即保护（第一版行为），不看外接路径。
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter<TriggerMode>))]
 public enum TriggerMode { Recommended, Compatibility }
 
-/// <summary>恢复流程的触发原因。旧版 recovery-state.json 没有该字段，按 PowerLoss 读取。</summary>
-[JsonConverter(typeof(JsonStringEnumConverter<TriggerReason>))]
-public enum TriggerReason { PowerLoss, ExternalDisplayLost }
+/// <summary>
+/// 恢复流程的触发原因。v1 的 recovery-state.json 没有该字段 → AcToBattery；
+/// 早期开发版写入的 "PowerLoss" 也读作 AcToBattery。
+/// </summary>
+[JsonConverter(typeof(TriggerReasonConverter))]
+public enum TriggerReason
+{
+    /// <summary>仅市电转电池（兼容模式）。</summary>
+    AcToBattery,
+    /// <summary>仅外接活动显示路径消失（市电未变化）。</summary>
+    ExternalDisplayLost,
+    /// <summary>市电转电池 + 外接活动显示路径消失。</summary>
+    CombinedEvidence,
+}
+
+public sealed class TriggerReasonConverter : JsonConverter<TriggerReason>
+{
+    public override TriggerReason Read(ref System.Text.Json.Utf8JsonReader r, Type t, System.Text.Json.JsonSerializerOptions o)
+    {
+        if (r.TokenType == System.Text.Json.JsonTokenType.Number && r.TryGetInt32(out var n) && Enum.IsDefined((TriggerReason)n)) return (TriggerReason)n;
+        var s = r.TokenType == System.Text.Json.JsonTokenType.String ? r.GetString() : null;
+        if (string.Equals(s, "PowerLoss", StringComparison.OrdinalIgnoreCase)) return TriggerReason.AcToBattery;
+        if (s != null && Enum.TryParse<TriggerReason>(s, true, out var v) && Enum.IsDefined(v)) return v;
+        throw new System.Text.Json.JsonException($"未知的触发原因：{s}");
+    }
+    public override void Write(System.Text.Json.Utf8JsonWriter w, TriggerReason v, System.Text.Json.JsonSerializerOptions o) => w.WriteStringValue(v.ToString());
+}
 
 /// <summary>恢复状态机的状态。</summary>
 public enum RecoveryStatus
@@ -76,14 +101,15 @@ public static class DisplayModeText
 
     public static string Of(TriggerMode m) => m switch
     {
-        TriggerMode.Recommended => "推荐：断电或外接显示路径消失",
-        _ => "兼容：仅市电转电池",
+        TriggerMode.Recommended => "推荐：断电且外接活动路径消失 / 外接活动路径消失",
+        _ => "兼容：市电转电池即切屏 / 外接活动路径消失",
     };
 
     public static string Of(TriggerReason r) => r switch
     {
-        TriggerReason.PowerLoss => "市电转电池",
-        _ => "外接显示路径消失",
+        TriggerReason.AcToBattery => "市电转电池",
+        TriggerReason.ExternalDisplayLost => "外接活动显示路径消失",
+        _ => "市电转电池 + 外接活动路径消失",
     };
 
     public static string Of(PowerSource p) => p switch

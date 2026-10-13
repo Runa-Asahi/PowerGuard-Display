@@ -50,11 +50,15 @@
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="当前显示模式" Style="{StaticResource Label}"/><TextBlock x:Name="ModeText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="自动恢复" Style="{StaticResource Label}"/><TextBlock x:Name="AutoRestoreText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="笔记本内屏" Style="{StaticResource Label}"/><TextBlock x:Name="InternalText" Style="{StaticResource Value}"/></StackPanel></Border>
-                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="外接显示路径（Windows 报告）" Style="{StaticResource Label}"/><TextBlock x:Name="ExternalText" Style="{StaticResource Value}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="外接活动显示路径（Windows 检测）" Style="{StaticResource Label}"/><TextBlock x:Name="ExternalText" Style="{StaticResource Value}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="外接可用目标（Windows 检测）" Style="{StaticResource Label}"/><TextBlock x:Name="ExternalAvailText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="恢复流程" Style="{StaticResource Label}"/><TextBlock x:Name="FlowText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="登录自启动" Style="{StaticResource Label}"/><TextBlock x:Name="StartupText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="触发方式" Style="{StaticResource Label}"/><TextBlock x:Name="TriggerModeText" Style="{StaticResource Value}"/></StackPanel></Border>
                             <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="最近触发原因" Style="{StaticResource Label}"/><TextBlock x:Name="TriggerReasonText" Style="{StaticResource Value}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="外接路径消失确认" Style="{StaticResource Label}"/><TextBlock x:Name="LostConfirmText" Style="{StaticResource Value}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="未完成的恢复标记" Style="{StaticResource Label}"/><TextBlock x:Name="MarkerExistsText" Style="{StaticResource Value}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="关机前尝试" Style="{StaticResource Label}"/><TextBlock x:Name="ShutdownTryText" Style="{StaticResource Value}"/></StackPanel></Border>
                         </UniformGrid>
 
                         <Grid>
@@ -93,7 +97,7 @@
                         </Grid>
 
                         <TextBlock Style="{StaticResource Hint}" Margin="2,0,12,8"
-                                   Text="说明：“外接显示路径”是 Windows 通过 QueryDisplayConfig 报告的连接状态，不代表显示器已通电亮屏。部分显示器关机或断电后仍会被 Windows 报告为可用，此时无法通过“外接显示路径消失”检测到，只能依靠市电转电池信号；恢复是否真正出画面请以肉眼为准。"/>
+                                   Text="说明：“外接活动显示路径”= Windows 当前正在向该外接目标输出的路径；“外接可用目标”= Windows 检测到外接显示路径可连接（targetAvailable）。两者都来自 QueryDisplayConfig，都不代表显示器已经通电亮屏。部分 HDMI 显示器关机/断电后仍保留 EDID/热插拔信号，Windows 可能继续保持活动路径，此时无法检测到显示器断电；恢复是否真正出画面请以肉眼为准。"/>
                     </StackPanel>
                 </ScrollViewer>
 
@@ -104,7 +108,7 @@
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
                                 <TextBlock Text="保护与恢复" Style="{StaticResource CardTitle}"/>
-                                <CheckBox x:Name="SAutoSwitch" Content="断电（市电转电池）时自动切回笔记本内屏"/>
+                                <CheckBox x:Name="SAutoSwitch" Content="启用自动保护（按下方“触发方式”切回笔记本内屏）"/>
                                 <CheckBox x:Name="SAutoRestore" Content="来电后在外接显示器稳定可用时自动恢复首选模式"/>
                                 <Grid Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -120,11 +124,14 @@
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <TextBlock Text="触发方式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="STriggerMode" Grid.Column="1" Width="320" HorizontalAlignment="Left">
-                                        <ComboBoxItem Tag="Recommended" Content="推荐：市电转电池 或 外接显示路径消失"/>
-                                        <ComboBoxItem Tag="Compatibility" Content="兼容：仅市电转电池（第一版行为）"/>
+                                        <ComboBoxItem Tag="Recommended" Content="推荐：市电转电池时先确认外接活动路径已消失"/>
+                                        <ComboBoxItem Tag="Compatibility" Content="兼容：市电转电池即切回内屏（第一版行为）"/>
                                     </ComboBox>
                                 </Grid>
-                                <TextBlock Style="{StaticResource Hint}" Text="推荐模式下，外接显示路径从“活动”变为“不活动且不可用”并持续确认时间后，也会切回内屏；之后显示路径重新可用并稳定即可恢复，无需等待市电事件。按 Win+P 主动切到内屏不会触发（此时外接路径仍可用）。"/>
+                                <TextBlock Style="{StaticResource Hint}" Text="推荐：只拔笔记本电源而显示器仍在显示时不会切屏（只记录）；市电转电池且外接活动路径已消失才切回内屏。代价：若显示器断电后 Windows 仍保持活动路径（见下），推荐模式在断电时不会切屏。"/>
+                                <TextBlock Style="{StaticResource Hint}" Text="兼容：只要确认市电转电池就切回内屏，不看外接路径。代价：只拔电源、显示器仍亮时也会切走外接屏，来电后再恢复。"/>
+                                <TextBlock Style="{StaticResource Hint}" Text="两种模式都会检测“外接活动显示路径消失”：上一次为“仅第二屏幕”且有外接活动路径，变为 0 条并在确认时间后重新查询仍为 0，即切回内屏；市电一直正常时，外接目标重新可用并稳定后即可恢复。按 Win+P 主动切换（外接目标仍可用）以及本程序/手动切屏后 15 秒内不会触发。"/>
+                                <TextBlock Style="{StaticResource Hint}" Text="HDMI 限制：部分显示器关机或断电后仍向电脑保留 EDID/热插拔信号，Windows 会继续报告外接路径，此时无法检测到显示器断电。“Windows 检测到外接显示路径”不等于显示器已亮屏。"/>
                                 <TextBlock Style="{StaticResource Hint}" Text="更改首选模式只会保存配置，不会立即切换显示；已在进行中的恢复流程使用断电时保存的首选模式快照。"/>
                             </StackPanel>
                         </Border>
@@ -156,8 +163,8 @@
                             <StackPanel>
                                 <TextBlock Text="启动、通知与日志" Style="{StaticResource CardTitle}"/>
                                 <CheckBox x:Name="SStartup" Content="当前用户登录后自动启动（Windows 任务计划程序，无需管理员）"/>
-                                <CheckBox x:Name="SShutdownTry" Content="关机/注销时尽力尝试一次恢复首选模式（实验性，默认关闭）"/>
-                                <TextBlock Style="{StaticResource Hint}" Margin="22,0,0,6" Text="仅在存在未完成的恢复流程、电源条件满足且 Windows 报告外接路径可用时尝试，限时约 3 秒，不会阻止关机，也不会清除恢复标记；下次开机后会重新校验，确认已是首选模式才清除。"/>
+                                <CheckBox x:Name="SShutdownTry" Content="正常关机/注销时尽力尝试一次切到首选模式（实验性，默认关闭）"/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="22,0,0,6" Text="仅在存在未完成的恢复流程、电源条件满足且 Windows 报告外接路径可用时尝试，限时约 3 秒，不会阻止关机，也不会清除恢复标记；下次开机后会重新校验，确认已是首选模式才清除。无法保证 BIOS、开机画面或登录界面会显示在 HDMI 显示器上；突然断电导致的关机不会触发这一尝试。"/>
                                 <CheckBox x:Name="SNotify" Content="显示系统通知"/>
                                 <CheckBox x:Name="SRetainLogs" Content="自动保留运行日志（保留 14 天；关闭后每次启动只保留当天日志）"/>
                             </StackPanel>
