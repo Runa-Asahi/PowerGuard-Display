@@ -42,7 +42,7 @@ public partial class MainWindow : Window
         _refresh = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _refresh.Tick += (_, _) => { if (IsVisible) Refresh(); };
         _refresh.Start();
-        SizeChanged += (_, _) => StatusGrid.Columns = ActualWidth < 980 ? 2 : 4;
+        SizeChanged += (_, _) => StatusGrid.Columns = ActualWidth < 980 ? 2 : 5;
         Refresh();
     }
 
@@ -108,7 +108,9 @@ public partial class MainWindow : Window
         ModeText.Text = t.QuerySucceeded ? DisplayModeText.Of(t.Mode) : "未知（查询失败）";
         InternalText.Text = !t.QuerySucceeded ? "未知" : t.InternalActive ? "活动中" : t.InternalPresent ? "已关闭（未显示）" : "未检测到";
         InternalText.Foreground = t.QuerySucceeded && !t.InternalActive ? B("Warn") : B("TextPrimary");
-        ExternalText.Text = !t.QuerySucceeded ? "未知" : t.ExternalAvailableCount == 0 ? "未识别" : t.ExternalActiveCount > 0 ? $"已识别 · 显示中（{t.ExternalActiveCount}）" : $"已识别 · 未启用（{t.ExternalAvailableCount}）";
+        ExternalText.Text = !t.QuerySucceeded ? "未知" : t.ExternalAvailableCount == 0 ? "未报告可用路径" : t.ExternalActiveCount > 0 ? $"路径活动中（{t.ExternalActiveCount}）" : $"路径可用 · 未启用（{t.ExternalAvailableCount}）";
+        TriggerModeText.Text = st.TriggerMode == TriggerMode.Recommended ? "推荐（断电 / 显示路径）" : "兼容（仅断电）";
+        TriggerReasonText.Text = snap.LastTriggerReason is { } tr ? $"{DisplayModeText.Of(tr)}" + (snap.LastTriggerAt is { } ta ? $" · {ta:MM-dd HH:mm}" : "") : "本次运行未触发";
         AutoRestoreText.Text = st.AutoRestoreOnPowerReturn ? "已启用" : "已禁用";
         FlowText.Text = DisplayModeText.Of(snap.Status);
         FlowText.Foreground = snap.Status switch { RecoveryStatus.RecoveryFailed => B("Bad"), RecoveryStatus.Normal => B("Ok"), _ => B("Warn") };
@@ -124,18 +126,29 @@ public partial class MainWindow : Window
             case RecoveryStatus.RecoveryFailed: title = "恢复失败，正在使用内屏"; detail = (snap.Marker?.LastError ?? "") + "  可点击“尝试恢复首选显示模式”重试。"; dot = B("Bad"); break;
             case RecoveryStatus.WaitingForExternal:
                 title = "断电保护中：等待外接显示器";
-                if (snap.Power != PowerSource.Ac) detail = "当前未接市电，保持笔记本内屏显示。来电后会等待外接显示路径稳定再恢复。";
-                else if (!st.AutoRestoreOnPowerReturn) detail = "已来电，但自动恢复已禁用，请手动恢复。";
+                if (snap.Marker?.TriggerReason != TriggerReason.ExternalDisplayLost && snap.Power != PowerSource.Ac) detail = "当前未接市电，保持笔记本内屏显示。来电后会等待外接显示路径稳定再恢复。";
+                else if (snap.Marker?.TriggerReason == TriggerReason.ExternalDisplayLost && snap.Power == PowerSource.Battery) detail = "当前为电池供电，保持笔记本内屏显示。";
+                else if (!st.AutoRestoreOnPowerReturn) detail = "恢复条件已满足，但自动恢复已禁用，请手动恢复。";
                 else if (snap.ExternalStableSince is { } since)
                 {
                     var left = st.StabilitySeconds - (int)(DateTimeOffset.Now - since).TotalSeconds;
                     detail = $"Windows 已检测到外接显示路径，稳定计时中，约 {Math.Max(0, left)} 秒后恢复。";
                 }
-                else detail = "已来电，等待 Windows 检测到外接显示路径。";
+                else detail = snap.Marker?.TriggerReason == TriggerReason.ExternalDisplayLost
+                    ? "因外接显示路径消失而切回内屏，等待 Windows 重新报告外接路径可用（不设超时）。"
+                    : "已来电，等待 Windows 报告外接显示路径可用。";
                 dot = B("Warn"); break;
             case RecoveryStatus.Normal:
                 title = protection == "已启用" ? "保护已就绪" : "保护未启用";
-                detail = $"断电时会切回笔记本内屏；来电后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。";
+                detail = st.TriggerMode == TriggerMode.Recommended
+                    ? $"市电转电池或外接显示路径消失时会切回笔记本内屏；条件恢复后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。"
+                    : $"市电转电池时会切回笔记本内屏；来电后恢复为“{DisplayModeText.Of(st.PreferredMode)}”。";
+                if (snap.ExternalLostSince is { } ls)
+                {
+                    var left = st.ExternalLostConfirmSeconds - (int)(DateTimeOffset.Now - ls).TotalSeconds;
+                    title = "外接显示路径消失，确认中";
+                    detail = $"若约 {Math.Max(0, left)} 秒内路径没有重新出现，将切回笔记本内屏。";
+                }
                 dot = protection == "已启用" ? B("Ok") : B("Warn"); break;
             default: title = DisplayModeText.Of(snap.Status) + "…"; detail = "正在执行，请稍候。"; dot = B("Accent"); break;
         }
@@ -145,7 +158,7 @@ public partial class MainWindow : Window
         LastEventText.Text = snap.LastEventText ?? "";
         LastEventText.Foreground = snap.LastEventResult switch { LogResult.Failure => B("Bad"), LogResult.Warning => B("Warn"), LogResult.Success => B("Ok"), _ => B("TextPrimary") };
         MarkerText.Text = snap.Marker is { } m
-            ? $"未完成的恢复流程：开始于 {m.StartedAt:MM-dd HH:mm:ss}，首选 {DisplayModeText.Of(m.PreferredModeSnapshot)}，已尝试 {m.AttemptCount} 次" + (m.LastAttemptAt is { } la ? $"，最近尝试 {la:HH:mm:ss}" : "") + (m.LastError is null ? "" : $"\n最近错误：{m.LastError}")
+            ? $"未完成的恢复流程（{DisplayModeText.Of(m.TriggerReason)}）：开始于 {m.StartedAt:MM-dd HH:mm:ss}，首选 {DisplayModeText.Of(m.PreferredModeSnapshot)}，已尝试 {m.AttemptCount} 次" + (m.LastAttemptAt is { } la ? $"，最近尝试 {la:HH:mm:ss}" : "") + (m.LastError is null ? "" : $"\n最近错误：{m.LastError}") + (m.LastShutdownAttemptAt is { } sa ? $"\n关机前尝试 {sa:MM-dd HH:mm}：{m.LastShutdownAttemptResult}" : "")
             : "无未完成的恢复流程";
         BtnDiscard.Visibility = snap.Marker != null ? Visibility.Visible : Visibility.Collapsed;
         BtnPause.Content = snap.Paused ? "恢复自动保护" : "暂停自动保护";
@@ -192,6 +205,9 @@ public partial class MainWindow : Window
         STimeout.Text = s.RecoveryTimeoutMinutes.ToString();
         SRetryInterval.Text = s.RetryIntervalSeconds.ToString();
         SMaxRetries.Text = s.MaxRetries.ToString();
+        SLostConfirm.Text = s.ExternalLostConfirmSeconds.ToString();
+        SShutdownTry.IsChecked = s.TryPreferredModeOnShutdown;
+        STriggerMode.SelectedItem = STriggerMode.Items.Cast<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.TriggerMode.ToString());
         SPreferred.SelectedItem = SPreferred.Items.Cast<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.PreferredMode.ToString());
     }
 
@@ -216,6 +232,9 @@ public partial class MainWindow : Window
         if (ReadInt(STimeout, 1, 1440, "恢复超时时间", errors, out var b)) n.RecoveryTimeoutMinutes = b;
         if (ReadInt(SRetryInterval, 5, 3600, "重试间隔", errors, out var c)) n.RetryIntervalSeconds = c;
         if (ReadInt(SMaxRetries, 0, 10, "最大重试次数", errors, out var d)) n.MaxRetries = d;
+        if (ReadInt(SLostConfirm, 2, 120, "外接路径消失确认时间", errors, out var f)) n.ExternalLostConfirmSeconds = f;
+        n.TryPreferredModeOnShutdown = SShutdownTry.IsChecked == true;
+        if (STriggerMode.SelectedItem is ComboBoxItem ti && Enum.TryParse<TriggerMode>((string)ti.Tag, out var tm)) n.TriggerMode = tm;
         if (SPreferred.SelectedItem is ComboBoxItem item && Enum.TryParse<DisplayMode>((string)item.Tag, out var mode)) n.PreferredMode = mode;
         if (errors.Count > 0) { SettingsResult.Foreground = B("Bad"); SettingsResult.Text = string.Join("；", errors); return; }
 
@@ -240,7 +259,7 @@ public partial class MainWindow : Window
         {
             var modeChanged = n.PreferredMode != _app.Settings.PreferredMode;
             _app.Settings = n;
-            _app.Log.Log(LogCategory.Settings, $"设置已保存（首选模式 {DisplayModeText.Of(n.PreferredMode)}，稳定 {n.StabilitySeconds}s，超时 {n.RecoveryTimeoutMinutes}min，重试 {n.MaxRetries}×{n.RetryIntervalSeconds}s）", LogResult.Success);
+            _app.Log.Log(LogCategory.Settings, $"设置已保存（触发方式 {n.TriggerMode}，关机前尝试 {(n.TryPreferredModeOnShutdown ? "开" : "关")}，首选模式 {DisplayModeText.Of(n.PreferredMode)}，稳定 {n.StabilitySeconds}s，超时 {n.RecoveryTimeoutMinutes}min，重试 {n.MaxRetries}×{n.RetryIntervalSeconds}s）", LogResult.Success);
             SettingsResult.Foreground = B("Ok");
             SettingsResult.Text = "设置已保存。" + msg + (modeChanged ? "首选模式已更新，未切换当前显示。" : "");
         }

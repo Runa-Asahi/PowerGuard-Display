@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 namespace PowerGuard.Core;
 
 [JsonConverter(typeof(JsonStringEnumConverter<LogCategory>))]
-public enum LogCategory { App, Startup, Power, Display, Switch, Recovery, Settings, Error }
+public enum LogCategory { App, Startup, Power, Display, Switch, Recovery, Settings, Error, Trigger, Shutdown }
 
 [JsonConverter(typeof(JsonStringEnumConverter<LogResult>))]
 public enum LogResult { Info, Success, Warning, Failure }
@@ -23,6 +23,8 @@ public sealed record LogEntry(DateTimeOffset Time, LogCategory Category, string 
         LogCategory.Recovery => "恢复流程",
         LogCategory.Settings => "设置",
         LogCategory.Error => "异常",
+        LogCategory.Trigger => "触发",
+        LogCategory.Shutdown => "关机",
         _ => Category.ToString(),
     };
     public string ResultText => Result switch

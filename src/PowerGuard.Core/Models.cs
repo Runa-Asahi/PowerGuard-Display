@@ -9,6 +9,17 @@ public enum PowerSource { Unknown, Ac, Battery }
 [JsonConverter(typeof(JsonStringEnumConverter<DisplayMode>))]
 public enum DisplayMode { Unknown, Internal, External, Extend, Clone }
 
+/// <summary>
+/// 触发方式。Recommended：市电转电池 或 “外接显示路径消失”（确认窗口后）都会触发保护；
+/// Compatibility：只响应市电转电池（第一版行为）。
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<TriggerMode>))]
+public enum TriggerMode { Recommended, Compatibility }
+
+/// <summary>恢复流程的触发原因。旧版 recovery-state.json 没有该字段，按 PowerLoss 读取。</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<TriggerReason>))]
+public enum TriggerReason { PowerLoss, ExternalDisplayLost }
+
 /// <summary>恢复状态机的状态。</summary>
 public enum RecoveryStatus
 {
@@ -61,6 +72,18 @@ public static class DisplayModeText
         DisplayMode.Extend => "扩展",
         DisplayMode.Clone => "复制",
         _ => "未知",
+    };
+
+    public static string Of(TriggerMode m) => m switch
+    {
+        TriggerMode.Recommended => "推荐：断电或外接显示路径消失",
+        _ => "兼容：仅市电转电池",
+    };
+
+    public static string Of(TriggerReason r) => r switch
+    {
+        TriggerReason.PowerLoss => "市电转电池",
+        _ => "外接显示路径消失",
     };
 
     public static string Of(PowerSource p) => p switch

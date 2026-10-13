@@ -85,7 +85,14 @@ public partial class App : Application
         Monitor.PowerSourceChanged += p => Fire(() => Coordinator.OnPowerSourceChangedAsync(p));
         Monitor.DisplayChanged += () => { Log.Log(LogCategory.Display, "收到 WM_DISPLAYCHANGE"); Fire(Coordinator.TickAsync); };
         Monitor.ResumedFromSleep += () => { Log.Log(LogCategory.Power, "系统从睡眠恢复，重新读取电源状态"); Fire(() => Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus(Log))); };
-        SessionEnding += (_, a) => Log.Log(LogCategory.App, $"Windows 会话结束（{a.ReasonSessionEnding}），恢复标记已持久化", LogResult.Info);
+        // 关机/注销：WM_QUERYENDSESSION（Application.SessionEnding）优先，WM_ENDSESSION 兜底；协调器内部保证只尝试一次。
+        // 绝不设置 e.Cancel，不阻止关机；最多占用约 3 秒。
+        SessionEnding += (_, a) =>
+        {
+            Log.Log(LogCategory.Shutdown, $"Windows 会话即将结束（{a.ReasonSessionEnding}），恢复标记已持久化");
+            OnSessionEnding();
+        };
+        Monitor.SessionEnding += OnSessionEnding;
 
         var power = SystemMonitor.ReadPowerStatus(Log);
         await Coordinator.InitializeAsync(power);
@@ -107,6 +114,14 @@ public partial class App : Application
         }
         else if (!autostart && Settings.ShowNotifications)
             _tray.Notify("断电护屏已在后台运行", "双击托盘图标打开控制台。");
+    }
+
+    public static readonly TimeSpan ShutdownBudget = TimeSpan.FromSeconds(3);
+
+    private void OnSessionEnding()
+    {
+        try { Coordinator.TryPreferredModeOnShutdown(ShutdownBudget); }
+        catch (Exception ex) { Log.Log(LogCategory.Shutdown, $"关机前尝试异常：{ex.Message}", LogResult.Failure); }
     }
 
     private void HookExceptions()

@@ -33,6 +33,7 @@ public sealed class FakeDisplay : IDisplayTopologyProvider, IDisplaySwitcher
     public DisplayTopology Query()
     {
         if (QueryFails) return DisplayTopology.Failed("模拟失败");
+        if (Override is not null) return Override;
         var mode = Mode;
         if (!ExternalConnected && mode != DisplayMode.Internal) mode = DisplayMode.Internal; // Windows 会自动回落
         var internalActive = mode is DisplayMode.Internal or DisplayMode.Extend or DisplayMode.Clone;
@@ -41,13 +42,18 @@ public sealed class FakeDisplay : IDisplayTopologyProvider, IDisplaySwitcher
             $"{mode}|{ExternalConnected}");
     }
 
-    public Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct)
+    public bool Hang { get; set; }
+    /// <summary>模拟显示器开着但 Windows 认为外接路径不可用的组合时使用：直接指定拓扑。</summary>
+    public DisplayTopology? Override { get; set; }
+
+    public async Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct)
     {
         BeforeLaunch?.Invoke(mode);
         Launches.Add(mode);
-        if (LaunchFails) return Task.FromResult(SwitchLaunchResult.Fail("模拟：找不到文件"));
+        if (Hang) await Task.Delay(Timeout.Infinite, ct);
+        if (LaunchFails) return SwitchLaunchResult.Fail("模拟：找不到文件");
         if (!SwitchHasNoEffect && (mode == DisplayMode.Internal || ExternalConnected)) Mode = mode;
-        return Task.FromResult(SwitchLaunchResult.Ok(0));
+        return SwitchLaunchResult.Ok(0);
     }
 }
 

@@ -10,11 +10,20 @@ public sealed record CoordinatorSnapshot(
     string? LastEventText,
     LogResult LastEventResult,
     DateTimeOffset? ExternalStableSince,
-    DateTimeOffset? WaitingOnAcSince);
+    DateTimeOffset? WaitingSince,
+    DateTimeOffset? ExternalLostSince,
+    TriggerReason? LastTriggerReason,
+    DateTimeOffset? LastTriggerAt,
+    string? LastShutdownAttempt);
+
+public sealed record ShutdownAttemptResult(bool Attempted, bool? Verified, string Message);
 
 /// <summary>
 /// 断电保护与自动恢复状态机。所有改变状态的流程都在 _gate 内串行执行（防重入）。
-/// 电源/显示事件由平台层推送进来；Tick 由低频定时器和 WM_DISPLAYCHANGE 驱动。
+/// 触发统一走 TriggerProtectionCoreAsync(TriggerReason)：
+///   - PowerLoss：市电 → 电池（确认窗口后仍为电池）；
+///   - ExternalDisplayLost：推荐模式下，外接显示路径从“活动”变为“既不活动也不可用”，并持续确认窗口。
+/// Tick 由低频定时器和 WM_DISPLAYCHANGE 驱动，用前后两次拓扑快照做检测。
 /// </summary>
 public sealed class RecoveryCoordinator
 {
@@ -35,7 +44,14 @@ public sealed class RecoveryCoordinator
     private DisplayTopology _lastTopology = DisplayTopology.Failed("尚未查询");
     private RecoveryState? _marker;
     private DateTimeOffset? _externalStableSince;
-    private DateTimeOffset? _waitingOnAcSince;
+    /// <summary>满足恢复的电源条件后开始计时（PowerLoss：市电恢复起；ExternalDisplayLost：触发起）。</summary>
+    private DateTimeOffset? _waitingSince;
+    /// <summary>外接显示路径消失的候选时间（确认窗口）。</summary>
+    private DateTimeOffset? _externalLostSince;
+    private TriggerReason? _lastTriggerReason;
+    private DateTimeOffset? _lastTriggerAt;
+    private string? _lastShutdownAttempt;
+    private int _shutdownAttempted;
     private DateTimeOffset? _lastEventAt;
     private string? _lastEventText;
     private LogResult _lastEventResult;
@@ -57,7 +73,8 @@ public sealed class RecoveryCoordinator
     public RecoveryState? Marker => _marker;
 
     public CoordinatorSnapshot Snapshot() => new(Status, Power, _lastTopology, _marker, _paused,
-        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince);
+        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingSince,
+        _externalLostSince, _lastTriggerReason, _lastTriggerAt, _lastShutdownAttempt);
 
     private void SetStatus(RecoveryStatus s)
     {
@@ -98,6 +115,23 @@ public sealed class RecoveryCoordinator
         catch (Exception ex) { _log.Log(LogCategory.Error, $"保存恢复标记失败：{ex.Message}", LogResult.Failure); }
     }
 
+    private void ClearMarker()
+    {
+        try { _store.Clear(); }
+        catch (Exception ex) { _log.Log(LogCategory.Error, $"清除恢复标记失败：{ex.Message}", LogResult.Failure); }
+        _marker = null; _externalStableSince = null; _waitingSince = null;
+    }
+
+    /// <summary>恢复所需的电源条件：断电触发必须回到市电；显示器触发只要求不是电池。</summary>
+    private bool PowerAllowsRestore(TriggerReason reason) =>
+        reason == TriggerReason.PowerLoss ? Power == PowerSource.Ac : Power != PowerSource.Battery;
+
+    private static bool IsInPreferred(DisplayTopology t, DisplayMode preferred) =>
+        t.QuerySucceeded && t.Mode == preferred && (!DisplaySwitchArgs.RequiresExternal(preferred) || t.ExternalActiveCount > 0);
+
+    private static bool ExternalReady(DisplayTopology t, DisplayMode preferred) =>
+        !DisplaySwitchArgs.RequiresExternal(preferred) || (t.QuerySucceeded && t.ExternalAvailableCount > 0);
+
     // ───────────────────────── 初始化 ─────────────────────────
 
     public async Task InitializeAsync(PowerSource initialPower)
@@ -107,13 +141,13 @@ public sealed class RecoveryCoordinator
         {
             lock (_powerLock) _power = initialPower;
             var topo = QueryTopology();
-            _log.Log(LogCategory.App, $"初始化：电源={DisplayModeText.Of(initialPower)}；{topo}");
+            _log.Log(LogCategory.App, $"初始化：电源={DisplayModeText.Of(initialPower)}；触发方式={DisplayModeText.Of(_settings().TriggerMode)}；{topo}");
 
             var r = _store.Load();
             if (r.Status == LoadStatus.Corrupt)
             {
-                // 文件存在说明之前有未完成流程；内容损坏时用当前首选模式重建，宁可继续保护也不丢流程。
-                _log.Log(LogCategory.Recovery, $"恢复标记损坏：{r.Message}。按未完成流程处理，首选模式取当前设置。", LogResult.Warning);
+                // 文件存在说明之前有未完成流程；内容损坏时按断电流程重建，宁可继续保护也不丢流程。
+                _log.Log(LogCategory.Recovery, $"恢复标记损坏：{r.Message}。按未完成的断电流程处理，首选模式取当前设置。", LogResult.Warning);
                 _marker = new RecoveryState { PreferredModeSnapshot = _settings().PreferredMode, StartedAt = _clock.Now, LastError = "恢复标记文件损坏后重建" };
                 SaveMarker();
             }
@@ -121,22 +155,33 @@ public sealed class RecoveryCoordinator
 
             if (_marker is null)
             {
-                // 没有标记：即使当前是电池也不切屏，不推断曾经断电。
+                // 没有标记：即使当前是电池或外接屏不在，也不切屏，不推断曾经断电。
                 _flowStatus = RecoveryStatus.Normal;
                 Event(LogCategory.App, initialPower == PowerSource.Battery ? "启动时为电池供电，但无恢复标记，不执行切屏" : "启动完成，无未完成的恢复流程", LogResult.Info);
                 return;
             }
 
-            Event(LogCategory.Recovery, $"启动时发现未完成的恢复标记（开始于 {_marker.StartedAt:yyyy-MM-dd HH:mm:ss}，首选模式 {DisplayModeText.Of(_marker.PreferredModeSnapshot)}）", LogResult.Warning);
+            var m = _marker;
+            _lastTriggerReason = m.TriggerReason; _lastTriggerAt = m.StartedAt;
+            Event(LogCategory.Recovery, $"启动时发现未完成的恢复标记（原因 {DisplayModeText.Of(m.TriggerReason)}，开始于 {m.StartedAt:yyyy-MM-dd HH:mm:ss}，首选 {DisplayModeText.Of(m.PreferredModeSnapshot)}）"
+                + (m.LastShutdownAttemptAt is { } sa ? $"；关机前尝试 {sa:MM-dd HH:mm:ss}：{m.LastShutdownAttemptResult}" : ""), LogResult.Warning);
+
+            // 规则 1：电源条件满足且 Windows 已处于首选模式（例如关机前尝试生效或 Windows 自行沿用）→ 校验通过后清除
+            if (PowerAllowsRestore(m.TriggerReason) && IsInPreferred(topo, m.PreferredModeSnapshot))
+            {
+                ClearMarker();
+                _flowStatus = RecoveryStatus.Normal;
+                Event(LogCategory.Recovery, $"启动时确认已处于首选模式 {DisplayModeText.Of(topo.Mode)}，恢复标记已清除", LogResult.Success);
+                return;
+            }
+
+            // 规则 2：继续等待；电源条件或外接路径不满足时确保内屏可用
             _flowStatus = RecoveryStatus.WaitingForExternal;
             _externalStableSince = null;
-            if (initialPower == PowerSource.Ac) _waitingOnAcSince = _clock.Now;
-            else
-            {
-                _waitingOnAcSince = null;
-                // 仍在电池/未知：继续保护内屏
-                if (!topo.QuerySucceeded || !topo.InternalActive) await SwitchToInternalCoreAsync(CancellationToken.None);
-            }
+            _waitingSince = PowerAllowsRestore(m.TriggerReason) ? _clock.Now : null;
+            var needInternal = !PowerAllowsRestore(m.TriggerReason) || !ExternalReady(topo, m.PreferredModeSnapshot);
+            if (needInternal && (!topo.QuerySucceeded || !topo.InternalActive))
+                await SwitchToInternalCoreAsync(CancellationToken.None);
             Changed();
         }
         finally { _gate.Release(); }
@@ -171,13 +216,8 @@ public sealed class RecoveryCoordinator
             try
             {
                 if (Power != PowerSource.Battery) return;
-                _waitingOnAcSince = null; _externalStableSince = null;
-                if (_paused) { _log.Log(LogCategory.Recovery, "保护已暂停，忽略断电事件", LogResult.Warning); return; }
-                if (!_settings().AutoSwitchOnPowerLoss) { _log.Log(LogCategory.Recovery, "设置中已禁用断电自动切屏，忽略断电事件", LogResult.Warning); return; }
-                if (_flowStatus is RecoveryStatus.Normal or RecoveryStatus.RecoveryFailed)
-                    await PowerLossFlowCoreAsync();
-                else
-                    _log.Log(LogCategory.Recovery, "已在恢复流程中，保持内屏优先，不重复切屏");
+                _waitingSince = null; _externalStableSince = null;
+                await TriggerProtectionCoreAsync(TriggerReason.PowerLoss);
             }
             finally { _gate.Release(); }
         }
@@ -186,9 +226,9 @@ public sealed class RecoveryCoordinator
             await _gate.WaitAsync();
             try
             {
-                if (_flowStatus == RecoveryStatus.WaitingForExternal && Power == PowerSource.Ac)
+                if (_flowStatus == RecoveryStatus.WaitingForExternal && _marker != null && Power == PowerSource.Ac)
                 {
-                    _waitingOnAcSince = _clock.Now; _externalStableSince = null;
+                    _waitingSince = _clock.Now; _externalStableSince = null;
                     Event(LogCategory.Recovery, "市电已恢复，等待外接显示路径稳定后再恢复（不会立即切回）", LogResult.Info);
                 }
             }
@@ -197,22 +237,48 @@ public sealed class RecoveryCoordinator
         // Unknown：只记录，绝不当作断电。
     }
 
-    private async Task PowerLossFlowCoreAsync()
+    // ───────────────────────── 统一触发入口 ─────────────────────────
+
+    /// <summary>所有自动保护触发的唯一入口（需持有 _gate）。</summary>
+    private async Task TriggerProtectionCoreAsync(TriggerReason reason)
     {
+        var s = _settings();
+        var label = DisplayModeText.Of(reason);
+        if (_paused) { _log.Log(LogCategory.Trigger, $"保护已暂停，忽略触发：{label}", LogResult.Warning); return; }
+        if (!s.AutoSwitchOnPowerLoss) { _log.Log(LogCategory.Trigger, $"设置中已禁用自动切屏，忽略触发：{label}", LogResult.Warning); return; }
+        if (reason == TriggerReason.ExternalDisplayLost && s.TriggerMode != TriggerMode.Recommended)
+        { _log.Log(LogCategory.Trigger, "兼容模式只响应市电转电池，忽略外接显示路径消失", LogResult.Info); return; }
+
+        if (_flowStatus is not (RecoveryStatus.Normal or RecoveryStatus.RecoveryFailed))
+        {
+            // 已在流程中：真实断电优先级更高，升级原因，要求市电恢复后才能恢复
+            if (_marker != null && reason == TriggerReason.PowerLoss && _marker.TriggerReason != TriggerReason.PowerLoss)
+            {
+                _marker.TriggerReason = TriggerReason.PowerLoss; SaveMarker();
+                _lastTriggerReason = reason; _lastTriggerAt = _clock.Now;
+                Event(LogCategory.Trigger, "流程中又检测到市电转电池，触发原因升级为断电，需市电恢复后再恢复显示", LogResult.Warning);
+            }
+            else _log.Log(LogCategory.Trigger, $"已在恢复流程中，保持内屏优先，不重复切屏（{label}）");
+            return;
+        }
+
+        _externalLostSince = null;
+        _lastTriggerReason = reason; _lastTriggerAt = _clock.Now;
         SetStatus(RecoveryStatus.PowerLossDetected);
         var topo = QueryTopology();
         // 先原子保存恢复标记，再切屏。
         _marker = new RecoveryState
         {
-            PreferredModeSnapshot = _settings().PreferredMode,
+            PreferredModeSnapshot = s.PreferredMode,
             ModeBeforePowerLoss = topo.Mode,
             StartedAt = _clock.Now,
+            TriggerReason = reason,
         };
         SaveMarker();
-        Event(LogCategory.Recovery, $"检测到市电转电池，已保存恢复标记（首选 {DisplayModeText.Of(_marker.PreferredModeSnapshot)}，断电前 {DisplayModeText.Of(topo.Mode)}）", LogResult.Warning);
+        Event(LogCategory.Trigger, $"触发保护（原因：{label}），已保存恢复标记（首选 {DisplayModeText.Of(_marker.PreferredModeSnapshot)}，触发前 {DisplayModeText.Of(topo.Mode)}）", LogResult.Warning);
         SetStatus(RecoveryStatus.SwitchingToInternal);
         await SwitchToInternalCoreAsync(CancellationToken.None);
-        _waitingOnAcSince = Power == PowerSource.Ac ? _clock.Now : null;
+        _waitingSince = PowerAllowsRestore(reason) ? _clock.Now : null;
         _externalStableSince = null;
         SetStatus(RecoveryStatus.WaitingForExternal);
     }
@@ -263,52 +329,106 @@ public sealed class RecoveryCoordinator
         if (!await _gate.WaitAsync(0)) return;
         try
         {
+            var prev = _lastTopology;
             var topo = QueryTopology();
-            if (_paused || _flowStatus != RecoveryStatus.WaitingForExternal || _marker is null) return;
-            if (Power != PowerSource.Ac) return; // 断电期间维持内屏，不因显示器波动切屏
+            if (_paused) { _externalLostSince = null; return; }
 
-            var s = _settings();
-            if (!s.AutoRestoreOnPowerReturn)
+            if (_flowStatus is RecoveryStatus.Normal or RecoveryStatus.RecoveryFailed)
             {
-                if (!_autoRestoreDisabledLogged) { _log.Log(LogCategory.Recovery, "自动恢复已禁用，等待用户手动恢复", LogResult.Warning); _autoRestoreDisabledLogged = true; }
+                await DetectExternalLostAsync(prev, topo);
                 return;
             }
-            _autoRestoreDisabledLogged = false;
-            var now = _clock.Now;
-            _waitingOnAcSince ??= now;
-            var preferred = _marker.PreferredModeSnapshot;
-            var ready = !DisplaySwitchArgs.RequiresExternal(preferred) || (topo.QuerySucceeded && topo.ExternalAvailableCount > 0);
-
-            if (ready)
-            {
-                if (_externalStableSince is null)
-                {
-                    _externalStableSince = now;
-                    Event(LogCategory.Display, $"Windows 检测到外接显示路径可用，开始 {s.StabilitySeconds} 秒稳定计时", LogResult.Info);
-                }
-                else if (now - _externalStableSince.Value >= TimeSpan.FromSeconds(s.StabilitySeconds))
-                {
-                    await RestoreCoreAsync(preferred, automatic: true);
-                    return;
-                }
-            }
-            else if (_externalStableSince is not null)
-            {
-                _externalStableSince = null;
-                Event(LogCategory.Display, "外接显示路径消失（连接抖动），稳定计时重置", LogResult.Warning);
-            }
-
-            if (now - _waitingOnAcSince.Value >= TimeSpan.FromMinutes(s.RecoveryTimeoutMinutes))
-            {
-                _marker.LastError = $"市电恢复后 {s.RecoveryTimeoutMinutes} 分钟内未检测到稳定的外接显示路径";
-                SaveMarker();
-                Event(LogCategory.Recovery, $"恢复超时：{_marker.LastError}。保留恢复标记，继续使用内屏", LogResult.Failure);
-                SetStatus(RecoveryStatus.RecoveryFailed);
-                await EnsureInternalSafeAsync();
-            }
+            if (_flowStatus != RecoveryStatus.WaitingForExternal || _marker is null) return;
+            await WaitingTickAsync(topo);
         }
         catch (Exception ex) { _log.Log(LogCategory.Error, $"定时检查异常：{ex.Message}", LogResult.Failure); }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// 基于快照的外接显示路径消失检测（仅推荐模式）：
+    /// 上一快照有活动外接路径，当前快照外接路径既不活动也不可用（targetAvailable=FALSE），并持续确认窗口。
+    /// 用户按 Win+P 主动切到内屏时外接目标仍“可用”，不会被误判。
+    /// </summary>
+    private async Task DetectExternalLostAsync(DisplayTopology prev, DisplayTopology topo)
+    {
+        var s = _settings();
+        if (s.TriggerMode != TriggerMode.Recommended || !s.AutoSwitchOnPowerLoss) { _externalLostSince = null; return; }
+        if (!topo.QuerySucceeded) return; // 查询失败不改变候选状态，也不触发
+        var lostNow = topo.ExternalActiveCount == 0 && topo.ExternalAvailableCount == 0;
+
+        if (_externalLostSince is null)
+        {
+            if (lostNow && prev.QuerySucceeded && prev.ExternalActiveCount > 0)
+            {
+                _externalLostSince = _clock.Now;
+                Event(LogCategory.Display, $"外接显示路径消失（上次快照有 {prev.ExternalActiveCount} 条活动路径），开始 {s.ExternalLostConfirmSeconds} 秒确认", LogResult.Warning);
+            }
+            return;
+        }
+        if (!lostNow)
+        {
+            _externalLostSince = null;
+            Event(LogCategory.Display, "确认窗口内外接显示路径重新出现，视为抖动，不触发保护", LogResult.Info);
+            return;
+        }
+        if (_clock.Now - _externalLostSince.Value >= TimeSpan.FromSeconds(s.ExternalLostConfirmSeconds))
+        {
+            _externalLostSince = null;
+            await TriggerProtectionCoreAsync(TriggerReason.ExternalDisplayLost);
+        }
+    }
+
+    private async Task WaitingTickAsync(DisplayTopology topo)
+    {
+        var m = _marker!;
+        if (!PowerAllowsRestore(m.TriggerReason))
+        {
+            // 断电触发且未回到市电，或任意触发下正在用电池：维持内屏，不因显示器波动切屏
+            _externalStableSince = null; _waitingSince = null;
+            return;
+        }
+        var s = _settings();
+        if (!s.AutoRestoreOnPowerReturn)
+        {
+            if (!_autoRestoreDisabledLogged) { _log.Log(LogCategory.Recovery, "自动恢复已禁用，等待用户手动恢复", LogResult.Warning); _autoRestoreDisabledLogged = true; }
+            return;
+        }
+        _autoRestoreDisabledLogged = false;
+        var now = _clock.Now;
+        _waitingSince ??= now;
+        var preferred = m.PreferredModeSnapshot;
+
+        if (ExternalReady(topo, preferred))
+        {
+            if (_externalStableSince is null)
+            {
+                _externalStableSince = now;
+                Event(LogCategory.Display, $"Windows 检测到外接显示路径可用，开始 {s.StabilitySeconds} 秒稳定计时", LogResult.Info);
+            }
+            else if (now - _externalStableSince.Value >= TimeSpan.FromSeconds(s.StabilitySeconds))
+            {
+                await RestoreCoreAsync(preferred, automatic: true);
+                return;
+            }
+        }
+        else if (_externalStableSince is not null)
+        {
+            _externalStableSince = null;
+            Event(LogCategory.Display, "外接显示路径消失（连接抖动），稳定计时重置", LogResult.Warning);
+        }
+
+        // 超时只针对断电触发（市电已恢复但显示器迟迟不可用）。
+        // 显示器触发时，显示器可能整晚关着；等待本身不切屏，因此不设超时，重试次数仍有上限。
+        if (m.TriggerReason == TriggerReason.PowerLoss && _externalStableSince is null
+            && now - _waitingSince.Value >= TimeSpan.FromMinutes(s.RecoveryTimeoutMinutes))
+        {
+            m.LastError = $"市电恢复后 {s.RecoveryTimeoutMinutes} 分钟内未检测到稳定的外接显示路径";
+            SaveMarker();
+            Event(LogCategory.Recovery, $"恢复超时：{m.LastError}。保留恢复标记，继续使用内屏", LogResult.Failure);
+            SetStatus(RecoveryStatus.RecoveryFailed);
+            await EnsureInternalSafeAsync();
+        }
     }
 
     private async Task<OperationResult> RestoreCoreAsync(DisplayMode preferred, bool automatic)
@@ -318,6 +438,7 @@ public sealed class RecoveryCoordinator
         var ct = _flowCts.Token;
         var s = _settings();
         var attempts = automatic ? 1 + s.MaxRetries : 1;
+        var reason = _marker?.TriggerReason;
         SetStatus(RecoveryStatus.RestoringPreferredMode);
         Event(LogCategory.Recovery, $"{(automatic ? "自动" : "手动")}恢复首选模式：{DisplayModeText.Of(preferred)}（最多 {attempts} 次）", LogResult.Info);
         string err = "";
@@ -337,9 +458,7 @@ public sealed class RecoveryCoordinator
                     if (t.QuerySucceeded && t.Mode == preferred)
                     {
                         // 只有确认系统状态符合预期才清除标记
-                        try { _store.Clear(); }
-                        catch (Exception ex) { _log.Log(LogCategory.Error, $"清除恢复标记失败：{ex.Message}", LogResult.Failure); }
-                        _marker = null; _externalStableSince = null; _waitingOnAcSince = null;
+                        ClearMarker();
                         SetStatus(RecoveryStatus.Normal);
                         Event(LogCategory.Recovery, $"恢复成功，已确认当前模式为 {DisplayModeText.Of(preferred)}，恢复标记已清除", LogResult.Success);
                         return new(true, $"已恢复为{DisplayModeText.Of(preferred)}。注意：这只代表 Windows 已启用该显示路径，请以显示器实际画面为准。");
@@ -354,11 +473,12 @@ public sealed class RecoveryCoordinator
                     _log.Log(LogCategory.Recovery, $"{s.RetryIntervalSeconds} 秒后重试");
                     await _delay.Delay(TimeSpan.FromSeconds(s.RetryIntervalSeconds), ct);
                     var t = QueryTopology();
-                    if (Power != PowerSource.Ac || (DisplaySwitchArgs.RequiresExternal(preferred) && t.ExternalAvailableCount == 0))
+                    var powerOk = reason is null ? Power != PowerSource.Battery : PowerAllowsRestore(reason.Value);
+                    if (!powerOk || !ExternalReady(t, preferred))
                     {
-                        Event(LogCategory.Recovery, "重试前条件不再满足（市电或外接路径消失），返回等待并保护内屏", LogResult.Warning);
+                        Event(LogCategory.Recovery, "重试前条件不再满足（电源或外接路径变化），返回等待并保护内屏", LogResult.Warning);
                         _externalStableSince = null;
-                        _waitingOnAcSince = Power == PowerSource.Ac ? _waitingOnAcSince : null;
+                        if (!powerOk) _waitingSince = null;
                         SetStatus(_marker != null ? RecoveryStatus.WaitingForExternal : RecoveryStatus.Normal);
                         await EnsureInternalSafeAsync();
                         return new(false, "恢复中断：外接显示路径或市电已消失", "等待显示器稳定后再试。");
@@ -394,6 +514,67 @@ public sealed class RecoveryCoordinator
         await SwitchToInternalCoreAsync(CancellationToken.None);
     }
 
+    // ───────────────────────── 关机前尽力尝试 ─────────────────────────
+
+    /// <summary>
+    /// 关机/注销（WM_QUERYENDSESSION → Application.SessionEnding，或 WM_ENDSESSION）时尽力尝试一次切到首选模式，
+    /// 让 Windows 下次开机沿用该显示配置。严格限时、只尝试一次、绝不清除恢复标记、绝不取消关机。
+    /// 下次启动时由 InitializeAsync 重新校验并决定是否清除标记。
+    /// </summary>
+    public ShutdownAttemptResult TryPreferredModeOnShutdown(TimeSpan budget)
+    {
+        if (Interlocked.Exchange(ref _shutdownAttempted, 1) == 1) return new(false, null, "本次会话已尝试过");
+        ShutdownAttemptResult Skip(string why)
+        {
+            _log.Log(LogCategory.Shutdown, $"关机前尝试：跳过（{why}）");
+            _lastShutdownAttempt = $"跳过：{why}";
+            return new(false, null, why);
+        }
+        var s = _settings();
+        if (!s.TryPreferredModeOnShutdown) return Skip("设置未开启");
+        if (_paused) return Skip("保护已暂停");
+        if (!s.AutoRestoreOnPowerReturn) return Skip("自动恢复已禁用");
+        if (!_gate.Wait(0)) return Skip("其他切屏流程正在执行");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var m = _marker;
+            if (m is null) return Skip("没有未完成的恢复流程");
+            if (!PowerAllowsRestore(m.TriggerReason)) return Skip($"电源条件不满足（{DisplayModeText.Of(Power)}）");
+            var before = QueryTopology();
+            if (IsInPreferred(before, m.PreferredModeSnapshot)) return Skip("已处于首选模式");
+            if (!ExternalReady(before, m.PreferredModeSnapshot)) return Skip("Windows 未检测到外接显示路径");
+
+            using var cts = new CancellationTokenSource(budget);
+            string result; bool? verified = null;
+            try
+            {
+                var launchTask = Task.Run(() => _switcher.SwitchAsync(m.PreferredModeSnapshot, cts.Token));
+                if (!launchTask.Wait(budget)) result = "DisplaySwitch.exe 在时限内未返回";
+                else if (!launchTask.Result.Started) result = $"启动失败：{launchTask.Result.Error}";
+                else
+                {
+                    // 在剩余预算内短暂等待后查询一次，只用于记录
+                    var left = budget - sw.Elapsed;
+                    if (left > TimeSpan.FromMilliseconds(200)) Thread.Sleep(TimeSpan.FromMilliseconds(Math.Min(1500, left.TotalMilliseconds - 100)));
+                    var after = QueryTopology();
+                    verified = IsInPreferred(after, m.PreferredModeSnapshot);
+                    result = verified == true ? $"已调用，关机前查询为 {DisplayModeText.Of(after.Mode)}" : $"已调用，关机前未确认（当前 {DisplayModeText.Of(after.Mode)}）";
+                }
+            }
+            catch (Exception ex) { result = $"异常：{(ex as AggregateException)?.InnerException?.Message ?? ex.Message}"; }
+
+            m.LastShutdownAttemptAt = _clock.Now;
+            m.LastShutdownAttemptResult = result;
+            SaveMarker(); // 只更新诊断字段，标记保持 Pending
+            _lastShutdownAttempt = result;
+            _log.Log(LogCategory.Shutdown, $"关机前尝试切到 {DisplayModeText.Of(m.PreferredModeSnapshot)}：{result}（耗时 {sw.ElapsedMilliseconds} ms，恢复标记保留，下次启动校验）",
+                verified == true ? LogResult.Success : LogResult.Warning);
+            return new(true, verified, result);
+        }
+        finally { _gate.Release(); }
+    }
+
     // ───────────────────────── 用户操作 ─────────────────────────
 
     public async Task<OperationResult> ManualSwitchToInternalAsync()
@@ -403,11 +584,12 @@ public sealed class RecoveryCoordinator
         try
         {
             _log.Log(LogCategory.Switch, "用户手动请求切回笔记本内屏");
+            _externalLostSince = null;
             var r = await SwitchToInternalCoreAsync(CancellationToken.None);
             if (_marker != null && _flowStatus == RecoveryStatus.RecoveryFailed)
             {
-                // 用户手动处理后重新进入等待，由超时机制再次限制
-                _waitingOnAcSince = Power == PowerSource.Ac ? _clock.Now : null;
+                // 用户手动处理后重新进入等待，由超时/重试上限再次限制
+                _waitingSince = PowerAllowsRestore(_marker.TriggerReason) ? _clock.Now : null;
                 _externalStableSince = null;
                 SetStatus(RecoveryStatus.WaitingForExternal);
             }
@@ -445,10 +627,11 @@ public sealed class RecoveryCoordinator
         {
             if (_paused == paused) return;
             _paused = paused;
+            _externalLostSince = null;
             if (!paused)
             {
                 _flowStatus = _marker != null ? RecoveryStatus.WaitingForExternal : RecoveryStatus.Normal;
-                _waitingOnAcSince = Power == PowerSource.Ac && _marker != null ? _clock.Now : null;
+                _waitingSince = _marker != null && PowerAllowsRestore(_marker.TriggerReason) ? _clock.Now : null;
                 _externalStableSince = null;
             }
             Event(LogCategory.Recovery, paused ? "用户暂停了自动保护（恢复标记保留）" : "用户恢复了自动保护", LogResult.Info);
@@ -463,8 +646,7 @@ public sealed class RecoveryCoordinator
         await _gate.WaitAsync();
         try
         {
-            _store.Clear();
-            _marker = null; _externalStableSince = null; _waitingOnAcSince = null;
+            ClearMarker();
             _flowStatus = RecoveryStatus.Normal;
             Event(LogCategory.Recovery, "用户放弃了未完成的恢复流程，恢复标记已清除", LogResult.Info);
         }
