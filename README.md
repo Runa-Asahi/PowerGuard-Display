@@ -1,5 +1,9 @@
 # PowerGuard Display（断电护屏）
 
+![.NET 10](https://img.shields.io/badge/.NET-10-512BD4) ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
+
+> **English:** PowerGuard Display is a lightweight Windows tray app for laptops driving an external HDMI monitor in "second screen only" mode. When mains power fails it switches back to the built-in panel, and once the external display path is stable again it restores your preferred mode, resuming after a reboot if needed. No admin rights, no drivers, no network. Quick start: `dotnet build PowerGuardDisplay.slnx -c Release`, `dotnet test`, or `./publish.ps1` for a self-contained win-x64 build.
+
 一个轻量级 Windows 托盘工具：**宿舍断电（市电转电池）时自动切回笔记本内屏；来电后在外接显示器重新被 Windows 识别并稳定一段时间后，自动恢复首选显示模式；断电导致关机的话，下次登录后继续未完成的恢复流程。**
 
 - C# / .NET 10 / WPF + XAML，Win32 P/Invoke
