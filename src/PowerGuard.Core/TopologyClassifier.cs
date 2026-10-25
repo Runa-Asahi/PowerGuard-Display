@@ -1,12 +1,14 @@
 namespace PowerGuard.Core;
 
 /// <summary>一条 QueryDisplayConfig 路径中本程序关心的字段（与平台无关，便于测试）。</summary>
+/// <remarks>source 与 target 的适配器可能不同（混合显卡），因此分别保存。</remarks>
 public readonly record struct DisplayPath(
-    uint AdapterLow, int AdapterHigh, uint SourceId, uint TargetId,
+    (uint Low, int High) SourceAdapter, uint SourceId,
+    (uint Low, int High) TargetAdapter, uint TargetId,
     bool IsInternal, bool TargetAvailable, bool Active)
 {
-    public (uint, int, uint) TargetKey => (AdapterLow, AdapterHigh, TargetId);
-    public (uint, int, uint) SourceKey => (AdapterLow, AdapterHigh, SourceId);
+    public (uint, int, uint) TargetKey => (TargetAdapter.Low, TargetAdapter.High, TargetId);
+    public (uint, int, uint) SourceKey => (SourceAdapter.Low, SourceAdapter.High, SourceId);
 }
 
 /// <summary>由活动路径 + 全部路径推导显示模式与外接可用数量。</summary>

@@ -65,7 +65,7 @@ public sealed class RecoveryCoordinator
     public bool Paused => _snapshot.Paused;
     public PowerSource Power { get { lock (_powerLock) return _power; } }
     /// <summary>恢复标记的副本（修改它不影响协调器）。</summary>
-    public RecoveryState? Marker => _snapshot.Marker;
+    public RecoveryState? Marker => _snapshot.Marker?.Copy();
 
     public CoordinatorSnapshot Snapshot() => _snapshot;
 
