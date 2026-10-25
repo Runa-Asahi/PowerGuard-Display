@@ -4,7 +4,11 @@ using System.Text.Json.Serialization;
 
 namespace PowerGuard.Core;
 
-public enum LoadStatus { Loaded, Missing, Corrupt }
+/// <summary>
+/// Loaded：读取成功；Missing：文件不存在；Corrupt：内容损坏（已改名备份）；
+/// Unreadable：文件存在但暂时无法读取（被占用 / 无权限 / IO 错误），文件保持原样不做任何修改。
+/// </summary>
+public enum LoadStatus { Loaded, Missing, Corrupt, Unreadable }
 
 public sealed record LoadResult<T>(T? Value, LoadStatus Status, string? Message = null);
 
@@ -42,6 +46,11 @@ public class JsonFileStore<T> where T : class
                 var backup = $"{Path}.corrupt-{DateTime.Now:yyyyMMddHHmmss}";
                 try { File.Move(Path, backup, overwrite: true); } catch { /* 记录在消息中 */ }
                 return new(null, LoadStatus.Corrupt, $"{System.IO.Path.GetFileName(Path)} 已损坏（{ex.Message}），已备份为 {System.IO.Path.GetFileName(backup)}");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                // 被杀毒软件 / 同步盘占用或无权限：不改名、不覆盖，交给调用方按保守策略处理。
+                return new(null, LoadStatus.Unreadable, $"{System.IO.Path.GetFileName(Path)} 暂时无法读取（{ex.GetType().Name}：{ex.Message}）");
             }
         }
     }

@@ -17,11 +17,13 @@ public sealed class StartupTaskService
     public const string AutostartArg = "--autostart";
     private readonly IProcessRunner _runner;
     private readonly string _schtasks;
+    private readonly string _tempDir;
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
-    public StartupTaskService(IProcessRunner runner, string schtasksPath)
+    /// <param name="tempDir">临时任务 XML 的存放目录。默认使用程序自己的数据目录而不是公共 %TEMP%。</param>
+    public StartupTaskService(IProcessRunner runner, string schtasksPath, string? tempDir = null)
     {
-        _runner = runner; _schtasks = schtasksPath;
+        _runner = runner; _schtasks = schtasksPath; _tempDir = tempDir ?? Path.GetTempPath();
     }
 
     public static string BuildTaskXml(string exePath, string userId)
@@ -107,9 +109,10 @@ public sealed class StartupTaskService
 
     public async Task<OperationResult> EnableAsync(string exePath, string userId)
     {
-        var xmlPath = Path.Combine(Path.GetTempPath(), $"PowerGuardDisplay-task-{Guid.NewGuid():N}.xml");
+        var xmlPath = Path.Combine(_tempDir, $"PowerGuardDisplay-task-{Guid.NewGuid():N}.xml");
         try
         {
+            Directory.CreateDirectory(_tempDir);
             await File.WriteAllTextAsync(xmlPath, BuildTaskXml(exePath, userId), Encoding.Unicode);
             var r = await _runner.RunAsync(_schtasks, CreateArgs(xmlPath), Timeout);
             if (r.Ok) return new(true, "已创建登录自启动任务");
