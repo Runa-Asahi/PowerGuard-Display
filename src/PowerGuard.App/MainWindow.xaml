@@ -67,6 +67,7 @@
                                         <Button x:Name="BtnInternal" Style="{StaticResource Primary}" Content="立即切回笔记本内屏" Click="BtnInternal_Click"/>
                                         <Button x:Name="BtnRestore" Content="尝试恢复首选显示模式" Click="BtnRestore_Click"/>
                                         <Button x:Name="BtnPause" Content="暂停自动保护" Click="BtnPause_Click"/>
+                                        <Button x:Name="BtnPause1h" Content="暂停 1 小时" Click="BtnPause1h_Click" ToolTip="暂停自动保护 1 小时，到时自动恢复"/>
                                         <Button x:Name="BtnDiscard" Content="放弃未完成的恢复" Click="BtnDiscard_Click" Visibility="Collapsed"/>
                                         <Button Content="打开设置" Click="GoSettings_Click"/>
                                         <Button Content="查看日志" Click="GoLogs_Click"/>
@@ -104,6 +105,7 @@
                                 <TextBlock Text="保护与恢复" Style="{StaticResource CardTitle}"/>
                                 <CheckBox x:Name="SAutoSwitch" Content="断电（市电转电池）时自动切回笔记本内屏"/>
                                 <CheckBox x:Name="SAutoRestore" Content="来电后在外接显示器稳定可用时自动恢复首选模式"/>
+                                <CheckBox x:Name="SRestoreOnShutdown" Content="关机 / 重启 / 注销前尽力切回首选显示模式（仅在市电且检测到外接显示器时，最多约 4 秒，不会阻止关机）"/>
                                 <Grid Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <TextBlock Text="首选显示模式" VerticalAlignment="Center"/>
@@ -160,7 +162,7 @@
                     <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,4">
                         <ComboBox x:Name="LogCategoryFilter" Width="130" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
                         <ComboBox x:Name="LogResultFilter" Width="110" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
-                        <TextBox x:Name="LogSearch" Width="200" Margin="0,0,8,8" TextChanged="LogFilter_Changed" ToolTip="按内容筛选"/>
+                        <TextBox x:Name="LogSearch" Width="200" Margin="0,0,8,8" TextChanged="LogSearch_Changed" ToolTip="按内容筛选"/>
                         <Button Content="复制所选" Click="CopySelectedLogs_Click"/>
                         <Button Content="复制全部（筛选后）" Click="CopyAllLogs_Click"/>
                         <Button Content="打开日志目录" Click="OpenLogDir_Click"/>
