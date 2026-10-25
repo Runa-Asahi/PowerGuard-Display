@@ -1,6 +1,6 @@
 # PowerGuard Display（断电护屏）
 
-[![CI](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml/badge.svg)](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml) · 当前版本 **v1.1.0**（更新内容见文末 §9）
+[![CI](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml/badge.svg)](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml) · 当前版本 **v1.2.0**（更新内容见文末 §9）
 
 一个轻量级 Windows 托盘工具：**宿舍断电（市电转电池）时自动切回笔记本内屏；来电后在外接显示器重新被 Windows 识别并稳定一段时间后，自动恢复首选显示模式；断电导致关机的话，下次登录后继续未完成的恢复流程。**
 
@@ -145,7 +145,7 @@ Paused：用户暂停，忽略断电事件，不自动恢复；恢复保护后�
 
 `QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)` 读取活动路径，用 `outputTechnology` 区分内屏（INTERNAL / LVDS / 内嵌 DP / 内嵌 UDI）和外接屏，并推导当前模式（内外屏同源为“复制”，不同源为“扩展”）。`QueryDisplayConfig(QDC_ALL_PATHS)` 中 `targetAvailable = TRUE` 的外接目标被视为“Windows 检测到外接显示路径”。通过 `WM_DISPLAYCHANGE` 触发检查，再加每 3 秒一次的低频轮询。
 
-### 6.4 关机前恢复首选显示模式（v1.1 新增，默认开启）
+### 6.4 关机前恢复首选显示模式（v1.2 新增，默认开启）
 目的：**下次开机时 Windows 直接进入首选拓扑**（比如“仅第二屏幕”）。Windows 会记住最后一次使用的显示拓扑，所以关机前切回首选模式，开机和登录界面就直接显示在外接显示器上。
 
 - 隐藏窗口收到 `WM_QUERYENDSESSION`（关机 / 重启 / 注销）时，先用 `ShutdownBlockReasonCreate` 告诉 Windows 原因（“正在切换回首选显示模式”），再在后台线程同步执行 `SetDisplayConfig`，并在剩余时间内多次查询拓扑确认结果。
@@ -231,11 +231,13 @@ Windows 10 的 `DisplaySwitch.exe` 接受 `/internal /external /extend /clone`�
 
 ## 9. 更新记录
 
-### v1.1.0
+### v1.2.0
+> 说明：之前发布的 v1.1.0（多信号保护）因设计问题已撤回，v1.2.0 以已在实机验证过的 1.0.0 为基线，**不包含**多信号 / 外接路径消失触发，断电判定仍然只看“市电 → 电池”。
+
 - **新功能：关机 / 重启 / 注销前尽力切回首选显示模式**（§6.4），默认开启，可在设置中关闭。
 - 切屏默认改用原生 `SetDisplayConfig`，不再依赖 DisplaySwitch.exe 的参数格式（保留为回退）；DisplaySwitch 超时后会关掉残留的“投影”菜单。
 - 稳定性：配置 / 恢复标记文件被占用或无权限时不会再导致启动崩溃（不覆盖、不改名，按保守策略处理）；启动流程有全局异常兜底；协调器状态改为线程安全的快照，修复取消和释放之间的竞争。
 - 性能：显示接口类型缓存、轮询改为正常 10 秒 / 恢复中 2 秒且不叠加；日志改为常驻写入、跨天自动清理；日志页不再每条整体重排，搜索带防抖。
 - 体验：自定义托盘图标、“暂停 1 小时”、托盘切屏时菜单置灰；电源 UPS（PoAc=2）通知不再导致状态来回跳。
-- 工程：GitHub Actions（windows-latest）构建、测试并发布自包含和依赖框架两种包；拓扑推导移到 Core 并补齐测试（57 → 96 个）；配置版本 v2，自动迁移；修正 README 中的 `.slnx` 文件名。
+- 工程：GitHub Actions（windows-latest）构建、测试并发布自包含和依赖框架两种包；拓扑推导移到 Core 并补齐测试（57 → 96 个）；配置结构版本 v2，自动迁移；修正 README 中的 `.slnx` 文件名。
 
