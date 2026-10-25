@@ -18,9 +18,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
@@ -35,7 +35,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-results
           path: TestResults
@@ -55,13 +55,13 @@ jobs:
           }
 
       - name: Upload self-contained build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: PowerGuardDisplay-win-x64-self-contained
           path: publish/PowerGuardDisplay-*-win-x64-self-contained.zip
 
       - name: Upload framework-dependent build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: PowerGuardDisplay-win-x64-framework-dependent
           path: publish/PowerGuardDisplay-*-win-x64-framework-dependent.zip
