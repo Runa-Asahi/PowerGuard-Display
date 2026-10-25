@@ -19,6 +19,16 @@ public partial class App : Application
     private TrayIcon? _tray;
     private MainWindow? _window;
     private bool _exiting;
+    private int _pollBusy;
+    private TimeSpan _pollPeriod;
+    private DisplayTopologyProvider? _topology;
+
+    /// <summary>正常状态下的轮询间隔（主要依赖电源通知与 WM_DISPLAYCHANGE，轮询只是兜底）。</summary>
+    private static readonly TimeSpan IdlePoll = TimeSpan.FromSeconds(10);
+    /// <summary>恢复流程中（需要稳定计时 / 超时判定）的轮询间隔。</summary>
+    private static readonly TimeSpan ActivePoll = TimeSpan.FromSeconds(2);
+    /// <summary>关机前恢复的总时长预算。Windows 约 5 秒后才会显示“程序阻止关机”界面。</summary>
+    private static readonly TimeSpan ShutdownBudget = TimeSpan.FromSeconds(4);
 
     public static string DataDir { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PowerGuardDisplay");
     public static string LogDir => Path.Combine(DataDir, "logs");
@@ -41,6 +51,19 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        try { await StartupCoreAsync(e); }
+        catch (Exception ex)
+        {
+            // async void：任何异常都必须在这里接住，否则进程直接崩溃且无提示
+            try { Log?.Log(LogCategory.Error, $"启动失败：{ex}", LogResult.Failure); } catch { }
+            MessageBox.Show($"断电护屏启动失败：{ex.Message}\n\n日志目录：{LogDir}", "断电护屏", MessageBoxButton.OK, MessageBoxImage.Error);
+            try { _mutex?.ReleaseMutex(); } catch { }
+            Shutdown(1);
+        }
+    }
+
+    private async Task StartupCoreAsync(StartupEventArgs e)
+    {
 
         _mutex = new Mutex(true, MutexName, out var first);
         if (!first)
@@ -64,38 +87,46 @@ public partial class App : Application
         var sr = SettingsStore.Load();
         Settings = sr.Value!;
         var firstRun = sr.Status == LoadStatus.Missing;
-        if (sr.Status == LoadStatus.Corrupt) Log.Log(LogCategory.Settings, $"{sr.Message}，已使用安全默认值", LogResult.Warning);
-        if (sr.Status != LoadStatus.Loaded) TrySaveSettings(Settings);
-        var removed = Log.ApplyRetention(Settings.RetainLogs);
+        if (sr.Status is LoadStatus.Corrupt or LoadStatus.Unreadable) Log.Log(LogCategory.Settings, $"{sr.Message}，本次使用安全默认值", LogResult.Warning);
+        // Unreadable 时绝不覆盖用户的配置文件
+        if (sr.Status is LoadStatus.Missing or LoadStatus.Corrupt) TrySaveSettings(Settings);
+        else if (sr.Status == LoadStatus.Loaded && Settings.Normalize()) TrySaveSettings(Settings); // 版本迁移 / 越界修正后写回
+        var removed = Log.ApplyRetention(Settings.RetainLogs); // 之后跨天时由 FileLogger 自动执行
         if (removed > 0) Log.Log(LogCategory.App, $"已清理 {removed} 个过期日志文件");
         Log.LoadHistory();
 
-        var topology = new DisplayTopologyProvider();
+        var topology = _topology = new DisplayTopologyProvider();
         var switcher = new DisplaySwitcher(Log, () => Settings);
         Coordinator = new RecoveryCoordinator(() => Settings, new RecoveryStateStore(Path.Combine(DataDir, "recovery-state.json")),
             topology, switcher, new SystemClock(), new TaskDelay(), Log);
-        StartupTasks = new StartupTaskService(new ProcessRunner(), SchtasksPath);
+        StartupTasks = new StartupTaskService(new ProcessRunner(), SchtasksPath, DataDir);
 
         _tray = new TrayIcon(this);
         Coordinator.StateChanged += (_, _) => Dispatcher.BeginInvoke(() => _tray?.Update());
 
+        // 先订阅再 Start：注册电源通知时 Windows 会立即推送一次当前值，不能丢
         Monitor = new SystemMonitor(Log);
+        Monitor.PowerSourceChanged += p => Fire(() => Coordinator.OnPowerSourceChangedAsync(p));
+        // WM_DISPLAYCHANGE 不单独记日志：拓扑真正变化时协调器会记录，避免刷屏
+        Monitor.DisplayChanged += () => { _topology?.InvalidateCache(); Fire(Coordinator.TickAsync); };
+        Monitor.ResumedFromSleep += () =>
+        {
+            Log.Log(LogCategory.Power, "系统从睡眠恢复，重新读取电源状态与显示拓扑");
+            _topology?.InvalidateCache();
+            Fire(async () => { await Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus(Log)); await Coordinator.TickAsync(); });
+        };
+        Monitor.QueryEndSessionHandler = OnQueryEndSession;
         try { Monitor.Start(); MonitorRunning = true; }
         catch (Exception ex) { Log.Log(LogCategory.Error, $"系统事件监听启动失败：{ex.Message}", LogResult.Failure); }
-        Monitor.PowerSourceChanged += p => Fire(() => Coordinator.OnPowerSourceChangedAsync(p));
-        Monitor.DisplayChanged += () => { Log.Log(LogCategory.Display, "收到 WM_DISPLAYCHANGE"); Fire(Coordinator.TickAsync); };
-        Monitor.ResumedFromSleep += () => { Log.Log(LogCategory.Power, "系统从睡眠恢复，重新读取电源状态"); Fire(() => Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus(Log))); };
         SessionEnding += (_, a) => Log.Log(LogCategory.App, $"Windows 会话结束（{a.ReasonSessionEnding}），恢复标记已持久化", LogResult.Info);
 
         var power = SystemMonitor.ReadPowerStatus(Log);
         await Coordinator.InitializeAsync(power);
 
-        // 低频补充轮询：显示拓扑 + 电源状态（通知丢失时的兜底），3 秒一次
-        _timer = new Timer(_ => Fire(async () =>
-        {
-            await Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus());
-            await Coordinator.TickAsync();
-        }), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+        // 低频补充轮询：显示拓扑 + 电源状态（通知丢失时的兜底）。
+        // 正常状态 10 秒一次；恢复流程中 2 秒一次。上一轮未结束时跳过，不叠加。
+        _pollPeriod = IdlePoll;
+        _timer = new Timer(_ => Poll(), null, TimeSpan.FromSeconds(2), IdlePoll);
 
         _tray.Update();
         _ = ReconcileStartupTaskAsync();
@@ -107,6 +138,60 @@ public partial class App : Application
         }
         else if (!autostart && Settings.ShowNotifications)
             _tray.Notify("断电护屏已在后台运行", "双击托盘图标打开控制台。");
+    }
+
+    private void Poll()
+    {
+        if (Interlocked.Exchange(ref _pollBusy, 1) == 1) return;
+        Task.Run(async () =>
+        {
+            try
+            {
+                await Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus());
+                await Coordinator.TickAsync();
+            }
+            catch (Exception ex) { Log.Log(LogCategory.Error, $"轮询异常：{ex.Message}", LogResult.Failure); }
+            finally
+            {
+                var status = Coordinator.Status;
+                var want = status is RecoveryStatus.Normal or RecoveryStatus.RecoveryFailed ? IdlePoll : ActivePoll;
+                if (Coordinator.Paused) want = IdlePoll; // 定时暂停的到期检查精度 10 秒足够
+                if (want != _pollPeriod && !_exiting)
+                {
+                    _pollPeriod = want;
+                    try { _timer?.Change(want, want); } catch (ObjectDisposedException) { }
+                }
+                Volatile.Write(ref _pollBusy, 0);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 关机 / 重启 / 注销前（UI 线程同步调用）：尽力切回首选显示模式，使下次开机直接进入首选拓扑。
+    /// 期间用 ShutdownBlockReasonCreate 告诉 Windows 原因；总时长受 ShutdownBudget 限制，超时即放弃，始终允许关机。
+    /// </summary>
+    private void OnQueryEndSession(IntPtr hwnd, string reason)
+    {
+        Log.Log(LogCategory.App, $"收到会话结束通知（{reason}）");
+        if (!Settings.RestoreOnShutdown)
+        {
+            Log.Log(LogCategory.Switch, "关机前恢复：设置中已关闭，跳过");
+            return;
+        }
+        var blocked = false;
+        try
+        {
+            blocked = Native.NativeMethods.ShutdownBlockReasonCreate(hwnd, "断电护屏：正在切换回首选显示模式（最多几秒）…");
+            // 在线程池上执行，避免 UI 同步上下文导致的死锁；UI 线程只做限时等待
+            var work = Task.Run(() => Coordinator.PrepareForShutdownAsync(ShutdownBudget));
+            if (!work.Wait(ShutdownBudget + TimeSpan.FromMilliseconds(500)))
+                Log.Log(LogCategory.Switch, "关机前恢复：超出时间预算，已放弃等待（不影响关机）", LogResult.Warning);
+        }
+        catch (Exception ex) { Log.Log(LogCategory.Error, $"关机前恢复异常：{ex.Message}", LogResult.Failure); }
+        finally
+        {
+            if (blocked) Native.NativeMethods.ShutdownBlockReasonDestroy(hwnd);
+        }
     }
 
     private void HookExceptions()
@@ -192,6 +277,7 @@ public partial class App : Application
         _showEvent?.Dispose();
         Monitor?.Dispose();
         _tray?.Dispose();
+        Log.Dispose();
         _window?.Close();
         try { _mutex?.ReleaseMutex(); } catch { }
         _mutex?.Dispose();

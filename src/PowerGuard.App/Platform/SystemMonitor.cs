@@ -21,6 +21,15 @@ public sealed class SystemMonitor : IDisposable
     public event Action? ResumedFromSleep;
     public event Action? SessionEnding;
 
+    /// <summary>
+    /// 收到 WM_QUERYENDSESSION（或未先收到它的 WM_ENDSESSION）时在 UI 线程上同步调用，参数为窗口句柄与原因描述。
+    /// 处理程序必须自行限时；返回后本窗口始终允许结束会话。每次会话结束流程只调用一次。
+    /// </summary>
+    public Action<IntPtr, string>? QueryEndSessionHandler { get; set; }
+    private bool _endSessionHandled;
+
+    public IntPtr Handle => _source?.Handle ?? IntPtr.Zero;
+
     public SystemMonitor(IAppLogger log) => _log = log;
 
     public static PowerSource ReadPowerStatus(IAppLogger? log = null)
@@ -65,8 +74,12 @@ public sealed class SystemMonitor : IDisposable
                         if (s.PowerSetting == GUID_ACDC_POWER_SOURCE && s.DataLength >= 4)
                         {
                             var src = s.Data switch { 0 => PowerSource.Ac, 1 => PowerSource.Battery, _ => PowerSource.Unknown };
-                            if (s.Data == 2) _log.Log(LogCategory.Power, "系统报告短时电源（PoAc 2，如 UPS），按未知处理", LogResult.Warning);
-                            PowerSourceChanged?.Invoke(src);
+                            if (s.Data == 2)
+                            {
+                                // 短时电源（UPS）：不上报，避免与轮询读到的市电之间来回翻转；以 GetSystemPowerStatus 为准
+                                _log.Log(LogCategory.Power, "系统报告短时电源（PoAc 2，如 UPS），忽略该通知，以轮询结果为准", LogResult.Warning);
+                            }
+                            else PowerSourceChanged?.Invoke(src);
                         }
                     }
                     else if (evt == PBT_APMPOWERSTATUSCHANGE)
@@ -83,8 +96,21 @@ public sealed class SystemMonitor : IDisposable
                 case WM_DISPLAYCHANGE:
                     DisplayChanged?.Invoke();
                     break;
+                case WM_QUERYENDSESSION:
+                    RunEndSessionHandler(hwnd, lParam, "WM_QUERYENDSESSION");
+                    handled = true;
+                    return new IntPtr(1); // 始终允许关机 / 注销
                 case WM_ENDSESSION:
-                    if (wParam != IntPtr.Zero) SessionEnding?.Invoke();
+                    if (wParam != IntPtr.Zero)
+                    {
+                        RunEndSessionHandler(hwnd, lParam, "WM_ENDSESSION");
+                        SessionEnding?.Invoke();
+                    }
+                    else
+                    {
+                        _endSessionHandled = false; // 关机被取消，下次重新处理
+                        _log.Log(LogCategory.App, "会话结束已被取消");
+                    }
                     break;
             }
         }
@@ -93,6 +119,23 @@ public sealed class SystemMonitor : IDisposable
             _log.Log(LogCategory.Error, $"窗口消息处理异常：{ex.Message}", LogResult.Failure);
         }
         return IntPtr.Zero;
+    }
+
+    private void RunEndSessionHandler(IntPtr hwnd, IntPtr lParam, string source)
+    {
+        if (_endSessionHandled) return;
+        _endSessionHandled = true;
+        var flags = lParam.ToInt64();
+        var kind = (flags & ENDSESSION_LOGOFF) != 0 ? "注销" : "关机/重启";
+        if ((flags & ENDSESSION_CRITICAL) != 0) kind += "（强制）";
+        if ((flags & ENDSESSION_CLOSEAPP) != 0)
+        {
+            // 重启管理器（安装更新等）只是要求关闭本程序，并不是关机：不切屏
+            _log.Log(LogCategory.App, $"{source}：系统要求关闭程序（重启管理器），不执行关机前恢复");
+            return;
+        }
+        try { QueryEndSessionHandler?.Invoke(hwnd, $"{source}：{kind}"); }
+        catch (Exception ex) { _log.Log(LogCategory.Error, $"会话结束处理异常：{ex.Message}", LogResult.Failure); }
     }
 
     public void Dispose()

@@ -160,6 +160,30 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_TARGET_DEVICE_NAME requestPacket);
 
+    // ── 设置显示拓扑（与 Win+P 相同的系统接口） ──
+    public const uint SDC_TOPOLOGY_INTERNAL = 0x00000001;
+    public const uint SDC_TOPOLOGY_CLONE = 0x00000002;
+    public const uint SDC_TOPOLOGY_EXTEND = 0x00000004;
+    public const uint SDC_TOPOLOGY_EXTERNAL = 0x00000008;
+    public const uint SDC_APPLY = 0x00000080;
+
+    /// <summary>SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_*)：按数据库中保存的拓扑切换。</summary>
+    [DllImport("user32.dll")]
+    public static extern int SetDisplayConfig(uint numPathArrayElements, IntPtr pathArray, uint numModeInfoArrayElements, IntPtr modeInfoArray, uint flags);
+
+    // ── 关机 / 注销 ──
+    public const long ENDSESSION_CLOSEAPP = 0x00000001;
+    public const long ENDSESSION_CRITICAL = 0x40000000;
+    public const long ENDSESSION_LOGOFF = 0x80000000;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
+
     // ── 窗口 ──
     public const int SW_RESTORE = 9;
     [DllImport("user32.dll")]
