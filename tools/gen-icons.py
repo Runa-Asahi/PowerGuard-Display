@@ -1,4 +1,4 @@
-"""生成托盘 / 程序图标（盾牌 + 闪电）。用法：python3 tools/gen-icons.py（需要 Pillow）。"""
+"""生成托盘 / 程序图标与 README 配图（盾牌 + 闪电）。用法：python3 tools/gen-icons.py（需要 Pillow）。"""
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -25,6 +25,14 @@ def main() -> None:
     for name, color in COLORS.items():
         shield(color).save(OUT / f"tray-{name}.ico", sizes=sizes)
     shield(COLORS["ok"]).save(OUT / "app.ico", sizes=sizes)
+    # README 用图
+    docs = OUT.parent.parent.parent / "docs" / "images"
+    docs.mkdir(parents=True, exist_ok=True)
+    shield(COLORS["ok"]).resize((192, 192), Image.LANCZOS).save(docs / "logo.png")
+    strip = Image.new("RGBA", (4 * 72 - 8, 64), (0, 0, 0, 0))
+    for i, name in enumerate(["ok", "warn", "bad", "paused"]):
+        strip.paste(shield(COLORS[name]).resize((64, 64), Image.LANCZOS), (i * 72, 0))
+    strip.save(docs / "tray-states.png")
 
 
 if __name__ == "__main__":
