@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore PowerGuardDisplay.slnx
+
+      - name: Build (Release, warnings as errors)
+        run: dotnet build PowerGuardDisplay.slnx -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test tests/PowerGuard.Core.Tests/PowerGuard.Core.Tests.csproj -c Release --no-build --logger "trx;LogFileName=results.trx" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+
+      - name: Publish (self-contained + framework-dependent)
+        shell: pwsh
+        run: ./publish.ps1 -SkipTests -Zip
+
+      - name: Smoke check published exe
+        shell: pwsh
+        run: |
+          foreach ($d in 'publish/win-x64', 'publish/win-x64-fd') {
+            $exe = Join-Path $d 'PowerGuardDisplay.exe'
+            if (-not (Test-Path $exe)) { throw "missing $exe" }
+            $v = (Get-Item $exe).VersionInfo
+            Write-Host "$exe  $([math]::Round((Get-Item $exe).Length/1MB,1)) MB  FileVersion=$($v.FileVersion)"
+          }
+
+      - name: Upload self-contained build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerGuardDisplay-win-x64-self-contained
+          path: publish/PowerGuardDisplay-*-win-x64-self-contained.zip
+
+      - name: Upload framework-dependent build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerGuardDisplay-win-x64-framework-dependent
+          path: publish/PowerGuardDisplay-*-win-x64-framework-dependent.zip

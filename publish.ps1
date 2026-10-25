@@ -1,14 +1,17 @@
 <#
 .SYNOPSIS
-  构建、测试并发布 PowerGuard Display（win-x64 自包含单文件）。
+  构建、测试并发布 PowerGuard Display（win-x64）。同时生成两种包：
+    publish\win-x64      自包含单文件（约 70 MB，无需安装 .NET）
+    publish\win-x64-fd   依赖框架单文件（几 MB，需要 .NET 10 Desktop Runtime x64）
 .EXAMPLE
-  ./publish.ps1                 # 默认输出到 .\publish\win-x64
-  ./publish.ps1 -SkipTests -Output D:\Tools\PowerGuardDisplay
+  ./publish.ps1                 # 默认输出到 .\publish
+  ./publish.ps1 -SkipTests -Zip # CI：额外打包 zip
 #>
 param(
     [string]$Configuration = "Release",
-    [string]$Output = (Join-Path $PSScriptRoot "publish\win-x64"),
-    [switch]$SkipTests
+    [string]$Output = (Join-Path $PSScriptRoot "publish"),
+    [switch]$SkipTests,
+    [switch]$Zip
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -23,17 +26,36 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) { throw "单元测试失败（退出码 $LASTEXITCODE）" }
 }
 
-dotnet publish src/PowerGuard.App/PowerGuard.App.csproj `
-    -c $Configuration -r win-x64 --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true `
-    -o $Output
-if ($LASTEXITCODE -ne 0) { throw "发布失败（退出码 $LASTEXITCODE）" }
+$proj = "src/PowerGuard.App/PowerGuard.App.csproj"
+$version = ([xml](Get-Content $proj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+$sc = Join-Path $Output "win-x64"
+$fd = Join-Path $Output "win-x64-fd"
 
-$exe = Join-Path $Output "PowerGuardDisplay.exe"
-$size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+dotnet publish $proj -c $Configuration -r win-x64 --self-contained true `
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
+    -p:DebugType=none -o $sc
+if ($LASTEXITCODE -ne 0) { throw "自包含发布失败（退出码 $LASTEXITCODE）" }
+
+dotnet publish $proj -c $Configuration -r win-x64 --self-contained false `
+    -p:PublishSingleFile=true -p:DebugType=none -o $fd
+if ($LASTEXITCODE -ne 0) { throw "依赖框架发布失败（退出码 $LASTEXITCODE）" }
+
+foreach ($d in $sc, $fd) {
+    $exe = Join-Path $d "PowerGuardDisplay.exe"
+    $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+    Write-Host "发布完成：$exe（$size MB）" -ForegroundColor Green
+}
+
+if ($Zip) {
+    $z1 = Join-Path $Output "PowerGuardDisplay-$version-win-x64-self-contained.zip"
+    $z2 = Join-Path $Output "PowerGuardDisplay-$version-win-x64-framework-dependent.zip"
+    Remove-Item $z1, $z2 -ErrorAction SilentlyContinue
+    Compress-Archive -Path (Join-Path $sc "*") -DestinationPath $z1
+    Compress-Archive -Path (Join-Path $fd "*") -DestinationPath $z2
+    Write-Host "已打包：$z1"
+    Write-Host "已打包：$z2"
+}
+
 Write-Host ""
-Write-Host "发布完成：$exe（$size MB）" -ForegroundColor Green
-Write-Host "建议把整个目录复制到固定位置（例如 %LOCALAPPDATA%\Programs\PowerGuardDisplay）后再开启登录自启动，"
-Write-Host "因为自启动任务会指向 exe 的实际路径。"
+Write-Host "建议把 exe 复制到固定位置（例如 %LOCALAPPDATA%\Programs\PowerGuardDisplay）后再开启登录自启动，"
+Write-Host "因为自启动任务记录的是 exe 的完整路径。"
