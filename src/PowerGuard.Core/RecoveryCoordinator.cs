@@ -10,11 +10,16 @@ public sealed record CoordinatorSnapshot(
     string? LastEventText,
     LogResult LastEventResult,
     DateTimeOffset? ExternalStableSince,
-    DateTimeOffset? WaitingOnAcSince);
+    DateTimeOffset? WaitingOnAcSince,
+    DateTimeOffset? PausedUntil = null);
+
+/// <summary>关机前切屏的执行结果（用于日志与测试）。</summary>
+public sealed record ShutdownRestoreOutcome(bool Attempted, bool Success, ShutdownDecision Decision, string Message);
 
 /// <summary>
 /// 断电保护与自动恢复状态机。所有改变状态的流程都在 _gate 内串行执行（防重入）。
 /// 电源/显示事件由平台层推送进来；Tick 由低频定时器和 WM_DISPLAYCHANGE 驱动。
+/// 线程模型：可变字段只在持有 _gate 时修改；其他线程（UI、托盘）只读取通过 Publish() 发布的不可变快照。
 /// </summary>
 public sealed class RecoveryCoordinator
 {
@@ -27,6 +32,8 @@ public sealed class RecoveryCoordinator
     private readonly IAppLogger _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _powerLock = new();
+    private readonly object _ctsLock = new();
+    private volatile CoordinatorSnapshot _snapshot;
 
     private RecoveryStatus _flowStatus = RecoveryStatus.Normal;
     private bool _paused;
@@ -41,6 +48,7 @@ public sealed class RecoveryCoordinator
     private LogResult _lastEventResult;
     private CancellationTokenSource? _flowCts;
     private bool _autoRestoreDisabledLogged;
+    private DateTimeOffset? _pausedUntil;
 
     public event EventHandler? StateChanged;
 
@@ -49,15 +57,37 @@ public sealed class RecoveryCoordinator
     {
         _settings = settings; _store = store; _topology = topology; _switcher = switcher;
         _clock = clock; _delay = delay; _log = log;
+        _snapshot = BuildSnapshot();
     }
 
-    public RecoveryStatus Status => _paused ? RecoveryStatus.Paused : _flowStatus;
-    public bool Paused => _paused;
+    // 以下只读属性都来自已发布的快照，任何线程读取都安全。
+    public RecoveryStatus Status => _snapshot.Status;
+    public bool Paused => _snapshot.Paused;
     public PowerSource Power { get { lock (_powerLock) return _power; } }
-    public RecoveryState? Marker => _marker;
+    /// <summary>恢复标记的副本（修改它不影响协调器）。</summary>
+    public RecoveryState? Marker => _snapshot.Marker;
 
-    public CoordinatorSnapshot Snapshot() => new(Status, Power, _lastTopology, _marker, _paused,
-        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince);
+    public CoordinatorSnapshot Snapshot() => _snapshot;
+
+    private CoordinatorSnapshot BuildSnapshot() => new(_paused ? RecoveryStatus.Paused : _flowStatus, Power, _lastTopology, _marker?.Copy(), _paused,
+        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince, _pausedUntil);
+
+    /// <summary>发布新快照。只在持有 _gate（或构造期间）调用。</summary>
+    private void Publish() => _snapshot = BuildSnapshot();
+
+    private void CancelFlow() { lock (_ctsLock) _flowCts?.Cancel(); }
+
+    private CancellationToken NewFlowToken()
+    {
+        lock (_ctsLock)
+        {
+            _flowCts?.Dispose();
+            _flowCts = new CancellationTokenSource();
+            return _flowCts.Token;
+        }
+    }
+
+    private void ReleaseGate() { Publish(); _gate.Release(); }
 
     private void SetStatus(RecoveryStatus s)
     {
@@ -74,7 +104,7 @@ public sealed class RecoveryCoordinator
         Changed();
     }
 
-    private void Changed() { try { StateChanged?.Invoke(this, EventArgs.Empty); } catch { } }
+    private void Changed() { Publish(); try { StateChanged?.Invoke(this, EventArgs.Empty); } catch { } }
 
     private DisplayTopology QueryTopology()
     {
@@ -109,8 +139,16 @@ public sealed class RecoveryCoordinator
             var topo = QueryTopology();
             _log.Log(LogCategory.App, $"初始化：电源={DisplayModeText.Of(initialPower)}；{topo}");
 
-            var r = _store.Load();
-            if (r.Status == LoadStatus.Corrupt)
+            LoadResult<RecoveryState> r;
+            try { r = _store.Load(); }
+            catch (Exception ex) { r = new(null, LoadStatus.Unreadable, ex.Message); }
+            if (r.Status == LoadStatus.Unreadable)
+            {
+                // 文件存在但读不出来：同样按未完成流程保守处理，但不覆盖原文件（之后保存时才会写入）。
+                _log.Log(LogCategory.Recovery, $"恢复标记无法读取：{r.Message}。按未完成流程处理，首选模式取当前设置。", LogResult.Warning);
+                _marker = new RecoveryState { PreferredModeSnapshot = _settings().PreferredMode, StartedAt = _clock.Now, LastError = "恢复标记文件无法读取" };
+            }
+            else if (r.Status == LoadStatus.Corrupt)
             {
                 // 文件存在说明之前有未完成流程；内容损坏时用当前首选模式重建，宁可继续保护也不丢流程。
                 _log.Log(LogCategory.Recovery, $"恢复标记损坏：{r.Message}。按未完成流程处理，首选模式取当前设置。", LogResult.Warning);
@@ -139,7 +177,7 @@ public sealed class RecoveryCoordinator
             }
             Changed();
         }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
     }
 
     // ───────────────────────── 电源事件 ─────────────────────────
@@ -153,7 +191,9 @@ public sealed class RecoveryCoordinator
             if (p == _power) return; // 去重：注册时 Windows 会立即发送一次当前值
             prev = _power; _power = p; seq = ++_powerSeq;
         }
-        Event(LogCategory.Power, $"电源来源变化：{DisplayModeText.Of(prev)} → {DisplayModeText.Of(p)}", LogResult.Info);
+        await _gate.WaitAsync();
+        try { Event(LogCategory.Power, $"电源来源变化：{DisplayModeText.Of(prev)} → {DisplayModeText.Of(p)}", LogResult.Info); }
+        finally { ReleaseGate(); }
 
         if (p == PowerSource.Battery && prev == PowerSource.Ac)
         {
@@ -179,7 +219,7 @@ public sealed class RecoveryCoordinator
                 else
                     _log.Log(LogCategory.Recovery, "已在恢复流程中，保持内屏优先，不重复切屏");
             }
-            finally { _gate.Release(); }
+            finally { ReleaseGate(); }
         }
         else if (p == PowerSource.Ac)
         {
@@ -192,7 +232,7 @@ public sealed class RecoveryCoordinator
                     Event(LogCategory.Recovery, "市电已恢复，等待外接显示路径稳定后再恢复（不会立即切回）", LogResult.Info);
                 }
             }
-            finally { _gate.Release(); }
+            finally { ReleaseGate(); }
         }
         // Unknown：只记录，绝不当作断电。
     }
@@ -264,6 +304,7 @@ public sealed class RecoveryCoordinator
         try
         {
             var topo = QueryTopology();
+            if (_paused && _pausedUntil is { } until && _clock.Now >= until) ResumeCore("暂停时间已到，自动恢复保护");
             if (_paused || _flowStatus != RecoveryStatus.WaitingForExternal || _marker is null) return;
             if (Power != PowerSource.Ac) return; // 断电期间维持内屏，不因显示器波动切屏
 
@@ -308,19 +349,24 @@ public sealed class RecoveryCoordinator
             }
         }
         catch (Exception ex) { _log.Log(LogCategory.Error, $"定时检查异常：{ex.Message}", LogResult.Failure); }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
     }
 
     private async Task<OperationResult> RestoreCoreAsync(DisplayMode preferred, bool automatic)
     {
-        _flowCts?.Dispose();
-        _flowCts = new CancellationTokenSource();
-        var ct = _flowCts.Token;
+        var ct = NewFlowToken();
         var s = _settings();
         var attempts = automatic ? 1 + s.MaxRetries : 1;
         SetStatus(RecoveryStatus.RestoringPreferredMode);
         Event(LogCategory.Recovery, $"{(automatic ? "自动" : "手动")}恢复首选模式：{DisplayModeText.Of(preferred)}（最多 {attempts} 次）", LogResult.Info);
         string err = "";
+        var current = QueryTopology();
+        if (current.QuerySucceeded && current.Mode == preferred)
+        {
+            // 例如关机前已切回首选模式：无需再切，直接确认并清除标记
+            CompleteRestore(preferred, "当前已是首选模式，无需切换");
+            return new(true, $"当前已是{DisplayModeText.Of(preferred)}");
+        }
         try
         {
             for (var i = 1; i <= attempts; i++)
@@ -337,11 +383,7 @@ public sealed class RecoveryCoordinator
                     if (t.QuerySucceeded && t.Mode == preferred)
                     {
                         // 只有确认系统状态符合预期才清除标记
-                        try { _store.Clear(); }
-                        catch (Exception ex) { _log.Log(LogCategory.Error, $"清除恢复标记失败：{ex.Message}", LogResult.Failure); }
-                        _marker = null; _externalStableSince = null; _waitingOnAcSince = null;
-                        SetStatus(RecoveryStatus.Normal);
-                        Event(LogCategory.Recovery, $"恢复成功，已确认当前模式为 {DisplayModeText.Of(preferred)}，恢复标记已清除", LogResult.Success);
+                        CompleteRestore(preferred, $"恢复成功，已确认当前模式为 {DisplayModeText.Of(preferred)}");
                         return new(true, $"已恢复为{DisplayModeText.Of(preferred)}。注意：这只代表 Windows 已启用该显示路径，请以显示器实际画面为准。");
                     }
                     err = t.QuerySucceeded ? $"校验未通过，当前为 {DisplayModeText.Of(t.Mode)}（{t}）" : $"无法校验：{t.Error}";
@@ -385,6 +427,15 @@ public sealed class RecoveryCoordinator
             "请确认显示器已通电且 HDMI 连接正常，在 Windows“设置 > 系统 > 屏幕”中点“检测”，或按 Win+P 手动选择模式；稍后可再次点击“尝试恢复首选显示模式”。");
     }
 
+    private void CompleteRestore(DisplayMode preferred, string text)
+    {
+        try { _store.Clear(); }
+        catch (Exception ex) { _log.Log(LogCategory.Error, $"清除恢复标记失败：{ex.Message}", LogResult.Failure); }
+        _marker = null; _externalStableSince = null; _waitingOnAcSince = null;
+        SetStatus(RecoveryStatus.Normal);
+        Event(LogCategory.Recovery, $"{text}，恢复标记已清除", LogResult.Success);
+    }
+
     /// <summary>恢复失败后的安全策略：确保内屏可用。</summary>
     private async Task EnsureInternalSafeAsync()
     {
@@ -398,7 +449,7 @@ public sealed class RecoveryCoordinator
 
     public async Task<OperationResult> ManualSwitchToInternalAsync()
     {
-        _flowCts?.Cancel();
+        CancelFlow();
         await _gate.WaitAsync();
         try
         {
@@ -414,12 +465,12 @@ public sealed class RecoveryCoordinator
             return r;
         }
         catch (Exception ex) { _log.Log(LogCategory.Error, ex.ToString(), LogResult.Failure); return new(false, ex.Message); }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
     }
 
     public async Task<OperationResult> ManualRestorePreferredAsync()
     {
-        _flowCts?.Cancel();
+        CancelFlow();
         await _gate.WaitAsync();
         try
         {
@@ -434,46 +485,123 @@ public sealed class RecoveryCoordinator
             return await RestoreCoreAsync(preferred, automatic: false);
         }
         catch (Exception ex) { _log.Log(LogCategory.Error, ex.ToString(), LogResult.Failure); return new(false, ex.Message); }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
     }
 
-    public async Task SetPausedAsync(bool paused)
+    /// <param name="duration">暂停时长；null = 直到用户手动恢复（仍只在本次运行有效）。</param>
+    public async Task SetPausedAsync(bool paused, TimeSpan? duration = null)
     {
-        if (paused) _flowCts?.Cancel();
+        if (paused) CancelFlow();
         await _gate.WaitAsync();
         try
         {
-            if (_paused == paused) return;
-            _paused = paused;
-            if (!paused)
+            if (paused)
             {
-                _flowStatus = _marker != null ? RecoveryStatus.WaitingForExternal : RecoveryStatus.Normal;
-                _waitingOnAcSince = Power == PowerSource.Ac && _marker != null ? _clock.Now : null;
-                _externalStableSince = null;
+                var until = duration is { } d && d > TimeSpan.Zero ? _clock.Now + d : (DateTimeOffset?)null;
+                if (_paused && _pausedUntil == until) return;
+                _paused = true; _pausedUntil = until;
+                Event(LogCategory.Recovery, until is { } u ? $"用户暂停了自动保护，将于 {u:HH:mm} 自动恢复（恢复标记保留）" : "用户暂停了自动保护（恢复标记保留）", LogResult.Info);
             }
-            Event(LogCategory.Recovery, paused ? "用户暂停了自动保护（恢复标记保留）" : "用户恢复了自动保护", LogResult.Info);
+            else if (_paused) ResumeCore("用户恢复了自动保护");
         }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
+    }
+
+    private void ResumeCore(string text)
+    {
+        _paused = false; _pausedUntil = null;
+        _flowStatus = _marker != null ? RecoveryStatus.WaitingForExternal : RecoveryStatus.Normal;
+        _waitingOnAcSince = Power == PowerSource.Ac && _marker != null ? _clock.Now : null;
+        _externalStableSince = null;
+        Event(LogCategory.Recovery, text, LogResult.Info);
     }
 
     /// <summary>放弃未完成的恢复流程（用户明确操作）。</summary>
     public async Task DiscardRecoveryAsync()
     {
-        _flowCts?.Cancel();
+        CancelFlow();
         await _gate.WaitAsync();
         try
         {
-            _store.Clear();
+            try { _store.Clear(); }
+            catch (Exception ex) { _log.Log(LogCategory.Error, $"删除恢复标记文件失败：{ex.Message}（内存中已放弃该流程）", LogResult.Failure); }
             _marker = null; _externalStableSince = null; _waitingOnAcSince = null;
             _flowStatus = RecoveryStatus.Normal;
             Event(LogCategory.Recovery, "用户放弃了未完成的恢复流程，恢复标记已清除", LogResult.Info);
         }
-        finally { _gate.Release(); }
+        finally { ReleaseGate(); }
     }
 
     public void RefreshTopology()
     {
         if (!_gate.Wait(0)) return;
-        try { QueryTopology(); } finally { _gate.Release(); }
+        try { QueryTopology(); } finally { ReleaseGate(); }
+    }
+
+    // ───────────────────────── 关机前恢复 ─────────────────────────
+
+    /// <summary>
+    /// 关机 / 重启 / 注销前尽力切回首选显示模式，使下次开机直接进入首选拓扑。
+    /// 整个过程受 budget 限制（获取锁、切屏、校验都计入），超时即放弃，绝不阻止关机。
+    /// 不修改恢复标记：下次启动若已是首选模式，恢复流程会直接确认并清除标记。
+    /// </summary>
+    public async Task<ShutdownRestoreOutcome> PrepareForShutdownAsync(TimeSpan budget)
+    {
+        var deadline = _clock.Now + budget;
+        using var cts = new CancellationTokenSource(budget);
+        CancelFlow(); // 打断可能正在进行的重试等待
+        var lockWait = TimeSpan.FromMilliseconds(Math.Min(800, budget.TotalMilliseconds / 3));
+        if (!await _gate.WaitAsync(lockWait))
+        {
+            var busy = ShutdownDecision.Skip(_snapshot.Marker?.PreferredModeSnapshot ?? _settings().PreferredMode, "正在执行其他切屏操作，跳过关机前恢复");
+            _log.Log(LogCategory.Switch, $"关机前恢复：{busy.Reason}", LogResult.Warning);
+            return new(false, false, busy, busy.Reason);
+        }
+        try
+        {
+            var topo = QueryTopology();
+            var decision = ShutdownRestorePolicy.Decide(_settings(), Status == RecoveryStatus.Paused || _paused ? RecoveryStatus.Paused : _flowStatus,
+                _paused, Power, _marker, topo);
+            if (!decision.Apply)
+            {
+                _log.Log(LogCategory.Switch, $"关机前恢复：跳过（{decision.Reason}）", LogResult.Info);
+                return new(false, false, decision, decision.Reason);
+            }
+            _log.Log(LogCategory.Switch, $"关机前恢复：{decision.Reason}", LogResult.Info);
+            try
+            {
+                var launch = await _switcher.SwitchAsync(decision.Target, cts.Token);
+                if (!launch.Started)
+                {
+                    var m = $"关机前恢复失败：{launch.Error}";
+                    _log.Log(LogCategory.Switch, m, LogResult.Failure);
+                    return new(true, false, decision, m);
+                }
+                // 校验：在剩余时间内多次短间隔查询
+                while (true)
+                {
+                    var t = QueryTopology();
+                    if (t.QuerySucceeded && t.Mode == decision.Target)
+                    {
+                        var ok = $"关机前恢复成功：已确认为{DisplayModeText.Of(decision.Target)}";
+                        _log.Log(LogCategory.Switch, ok, LogResult.Success);
+                        return new(true, true, decision, ok);
+                    }
+                    if (_clock.Now + TimeSpan.FromMilliseconds(300) >= deadline) break;
+                    await _delay.Delay(TimeSpan.FromMilliseconds(300), cts.Token);
+                }
+            }
+            catch (OperationCanceledException) { }
+            var fail = $"关机前恢复：{budget.TotalSeconds:0.#} 秒内未能确认切换为{DisplayModeText.Of(decision.Target)}（已放弃，不影响关机）";
+            _log.Log(LogCategory.Switch, fail, LogResult.Warning);
+            return new(true, false, decision, fail);
+        }
+        catch (Exception ex)
+        {
+            var d = ShutdownDecision.Skip(_settings().PreferredMode, ex.Message);
+            _log.Log(LogCategory.Error, $"关机前恢复异常：{ex.Message}", LogResult.Failure);
+            return new(false, false, d, ex.Message);
+        }
+        finally { ReleaseGate(); }
     }
 }
