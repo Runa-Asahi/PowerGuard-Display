@@ -114,6 +114,7 @@ public partial class App : Application
 
         _tray = new TrayIcon(this);
         Coordinator.StateChanged += (_, _) => Dispatcher.BeginInvoke(() => _tray?.Update());
+        Coordinator.Alert += (title, text) => Dispatcher.BeginInvoke(() => _tray?.Alert(title, text));
 
         // 先订阅再 Start：注册电源通知时 Windows 会立即推送一次当前值，不能丢
         Monitor = new SystemMonitor(Log);

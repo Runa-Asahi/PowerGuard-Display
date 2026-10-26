@@ -138,8 +138,11 @@ public partial class MainWindow : Window
                 dot = B("Warn"); break;
             case RecoveryStatus.RecoveryFailed: title = "恢复失败，正在使用内屏"; detail = (snap.Marker?.LastError ?? "") + "  可点击“尝试恢复首选显示模式”重试。"; dot = B("Bad"); break;
             case RecoveryStatus.WaitingForExternal:
-                title = "断电保护中：等待外接显示器";
-                if (snap.Power != PowerSource.Ac) detail = "当前未接市电，保持笔记本内屏显示。来电后会等待外接显示路径稳定再恢复。";
+                title = snap.Power != PowerSource.Ac ? "断电保护中：正在使用笔记本内屏" : "已来电：等待外接显示器";
+                if (snap.Power != PowerSource.Ac)
+                    detail = "当前未接市电。程序会一直保持内屏点亮（Windows 若把显示切回外接会自动切回来）" +
+                             (snap.GuardAttempts > 0 ? $"，本次已纠正 {snap.GuardAttempts} 次" : "") +
+                             "。来电后等外接显示器稳定再恢复。";
                 else if (!st.AutoRestoreOnPowerReturn) detail = "已来电，但自动恢复已禁用，请手动恢复。";
                 else if (snap.ExternalStableSince is { } since)
                 {

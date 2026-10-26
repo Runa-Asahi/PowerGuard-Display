@@ -131,3 +131,33 @@ public class PowerLossRegressionTests
         Assert.Equal(DisplayMode.Internal, h.Display.Mode);
     }
 }
+
+public class AlertTests
+{
+    [Fact]
+    public async Task InternalSwitchFailure_RaisesAlert()
+    {
+        var h = new Harness();
+        var alerts = new List<string>();
+        h.C.Alert += (t, _) => alerts.Add(t);
+        await h.C.InitializeAsync(PowerSource.Ac);
+        h.Display.SwitchHasNoEffect = true;
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        Assert.Contains("无法切回笔记本内屏", alerts);
+    }
+
+    [Fact]
+    public async Task PersistentReverts_RaiseBackoffAlertOnce()
+    {
+        var h = new Harness();
+        var alerts = new List<string>();
+        h.C.Alert += (t, _) => alerts.Add(t);
+        await h.C.InitializeAsync(PowerSource.Ac);
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        h.Display.SwitchHasNoEffect = true;
+        h.Display.Mode = DisplayMode.External;
+        await h.RunFor(600);
+        Assert.Equal(1, alerts.Count(a => a == "内屏反复被切走"));
+        Assert.True(h.C.Snapshot().GuardAttempts > RecoveryCoordinator.GuardFastAttempts);
+    }
+}

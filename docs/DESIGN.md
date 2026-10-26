@@ -25,7 +25,7 @@ src/
     Native/NativeMethods.cs      P/Invoke 声明
     Platform/SystemMonitor.cs    隐藏窗口：RegisterPowerSettingNotification、WM_POWERBROADCAST、WM_DISPLAYCHANGE
     Platform/DisplayTopologyProvider.cs  QueryDisplayConfig / DisplayConfigGetDeviceInfo
-    Platform/DisplaySwitcher.cs  SetDisplayConfig 切屏，失败时回退 DisplaySwitch.exe
+    Platform/DisplaySwitcher.cs  DisplaySwitch.exe 切屏（v1.0.0 实机验证），第二次尝试 / 启动失败时用 SetDisplayConfig
     Platform/ProcessRunner.cs    无 shell 拼接的进程调用
     App.xaml(.cs)                生命周期、单实例、组装各服务
     TrayIcon.cs                  托盘图标与右键菜单
@@ -90,7 +90,9 @@ Paused：用户暂停，忽略断电事件，不自动恢复；恢复保护后�
 - **未知电源状态绝不当作断电**；只有“市电 → 电池”的确认转换才触发保护。
 - **启动时只因为是电池供电，不会切屏**；只有存在恢复标记才继续流程。
 - 恢复标记写入在切屏**之前**；清除恢复标记在**确认**当前模式等于首选模式**之后**。
-- 切屏默认调用 `SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_*)`（Win+P 背后的同一个系统接口），失败时回退 DisplaySwitch.exe（`settings.json` 的 `SwitchMethod`：`Auto`/`Native`/`DisplaySwitch`）。切换后等待 4 秒（`VerifyDelaySeconds`）再用 `QueryDisplayConfig` 校验，调用成功不算切换成功。
+- 切屏（`SwitchMethod=Auto`）先用 DisplaySwitch.exe（v1.0.0 起在 Lenovo Y7000 上实机验证）；启动失败，或第一次校验未通过后的第二次尝试，改用 `SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_*)`。官方文档规定 `SDC_SAVE_TO_DATABASE` 只能与 `SDC_USE_SUPPLIED_DISPLAY_CONFIG` 组合，所以这里不使用。
+- **断电时总是下发切内屏命令**，即使读到的已是“仅电脑屏幕”。断电瞬间外接显示器会短暂消失，Windows 先自行回落到内屏；显示器（仍保留 EDID）被重新识别后，Windows 会按数据库把这组显示器恢复成“仅第二屏幕”（2026-10-26 实机日志）。
+- **断电期间内屏守护**：`TickAsync` 在非市电、有恢复标记、未暂停时，如果内屏不在活动状态或拓扑读不出来，就重新切回内屏。前 6 次至少间隔 5 秒，之后每 60 秒一次，进入退避时发出一次警报。断电期间绝不自动恢复外接。切换后等待 4 秒（`VerifyDelaySeconds`）再用 `QueryDisplayConfig` 校验，调用成功不算切换成功。
 - 如果开始恢复时 Windows 已经是首选模式（例如关机前已切回，或你自己按了 Win+P），会直接确认并清除标记，不再切屏。
 - 所有切屏操作串行执行（防重入），不在 UI 线程上等待。
 - 恢复失败后不会无限循环：自动尝试次数 = 1 + 最大重试次数；超时后停止，等待用户手动操作或下一次断电/重启。
@@ -99,7 +101,7 @@ Paused：用户暂停，忽略断电事件，不自动恢复；恢复保护后�
 
 ## 电源检测
 
-隐藏的顶层窗口通过 `RegisterPowerSettingNotification(GUID_ACDC_POWER_SOURCE)` 接收 `WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE`（数据 0 = 市电，1 = 电池，2 = 短时电源/UPS → 忽略该通知，以轮询结果为准），同时处理 `PBT_APMPOWERSTATUSCHANGE`、睡眠恢复。启动时和低频轮询（正常 10 秒 / 恢复流程中 2 秒，上一轮未完成不叠加）用 `GetSystemPowerStatus` 兜底校验，重复的通知会被去重。退出时调用 `UnregisterPowerSettingNotification`。
+隐藏的顶层窗口通过 `RegisterPowerSettingNotification(GUID_ACDC_POWER_SOURCE)` 接收 `WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE`（数据 0 = 市电，1 = 电池，2 = 短时电源/UPS → 忽略该通知，以轮询结果为准），同时处理 `PBT_APMPOWERSTATUSCHANGE`、睡眠恢复。启动时和低频轮询（正常 3 秒 / 恢复流程中 2 秒，上一轮未完成不叠加）用 `GetSystemPowerStatus` 兜底校验，重复的通知会被去重。退出时调用 `UnregisterPowerSettingNotification`。
 
 ## 显示检测
 
@@ -108,7 +110,7 @@ Paused：用户暂停，忽略断电事件，不自动恢复；恢复保护后�
 ## 关机前恢复首选显示模式（v1.2 新增，默认开启）
 目的：**下次开机时 Windows 直接进入首选拓扑**（比如“仅第二屏幕”）。Windows 会记住最后一次使用的显示拓扑，所以关机前切回首选模式，开机和登录界面就直接显示在外接显示器上。
 
-- 隐藏窗口收到 `WM_QUERYENDSESSION`（关机 / 重启 / 注销）时，先用 `ShutdownBlockReasonCreate` 告诉 Windows 原因（“正在切换回首选显示模式”），再在后台线程同步执行 `SetDisplayConfig`，并在剩余时间内多次查询拓扑确认结果。
+- 隐藏窗口收到 `WM_QUERYENDSESSION`（关机 / 重启 / 注销）时，先用 `ShutdownBlockReasonCreate` 告诉 Windows 原因（“正在切换回首选显示模式”），再在后台线程执行切屏，并在剩余时间内多次查询拓扑确认结果。
 - **总时长不超过约 4 秒**（锁等待、切屏、校验都算在内），超时就放弃。**始终允许关机**，不会拦着 Windows。
 - 只在安全时才切（决策逻辑在 `ShutdownRestorePolicy`，有单元测试）：
   - 设置中已开启，且没有暂停保护；

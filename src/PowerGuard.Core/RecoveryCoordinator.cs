@@ -11,7 +11,8 @@ public sealed record CoordinatorSnapshot(
     LogResult LastEventResult,
     DateTimeOffset? ExternalStableSince,
     DateTimeOffset? WaitingOnAcSince,
-    DateTimeOffset? PausedUntil = null);
+    DateTimeOffset? PausedUntil = null,
+    int GuardAttempts = 0);
 
 /// <summary>关机前切屏的执行结果（用于日志与测试）。</summary>
 public sealed record ShutdownRestoreOutcome(bool Attempted, bool Success, ShutdownDecision Decision, string Message);
@@ -59,6 +60,15 @@ public sealed class RecoveryCoordinator
 
     public event EventHandler? StateChanged;
 
+    /// <summary>需要立刻引起用户注意的问题（标题, 内容）：内屏切换失败、断电期间无法保持内屏。App 用通知 + 提示音呈现。</summary>
+    public event Action<string, string>? Alert;
+
+    private void RaiseAlert(string title, string text)
+    {
+        _log.Log(LogCategory.Recovery, $"{title}：{text}", LogResult.Failure);
+        try { Alert?.Invoke(title, text); } catch { }
+    }
+
     public RecoveryCoordinator(Func<AppSettings> settings, IRecoveryStateStore store, IDisplayTopologyProvider topology,
         IDisplaySwitcher switcher, IClock clock, IDelay delay, IAppLogger log)
     {
@@ -77,7 +87,7 @@ public sealed class RecoveryCoordinator
     public CoordinatorSnapshot Snapshot() => _snapshot;
 
     private CoordinatorSnapshot BuildSnapshot() => new(_paused ? RecoveryStatus.Paused : _flowStatus, Power, _lastTopology, _marker?.Copy(), _paused,
-        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince, _pausedUntil);
+        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince, _pausedUntil, _guardAttempts);
 
     /// <summary>发布新快照。只在持有 _gate（或构造期间）调用。</summary>
     private void Publish() => _snapshot = BuildSnapshot();
@@ -310,6 +320,7 @@ public sealed class RecoveryCoordinator
         }
         if (_marker != null) { _marker.LastError = err; SaveMarker(); }
         Event(LogCategory.Switch, $"切换到内屏失败：{err}", LogResult.Failure);
+        RaiseAlert("无法切回笔记本内屏", "请按 Win+P 选择“仅电脑屏幕”；仍无画面时按 Win+Ctrl+Shift+B 重置显卡驱动。");
         return new(false, $"切换到内屏失败：{err}", "可按 Win+P 选择“仅电脑屏幕”，或按 Win+Ctrl+Shift+B 重置显卡驱动后重试。");
     }
 
@@ -393,6 +404,8 @@ public sealed class RecoveryCoordinator
         var interval = _guardAttempts >= GuardFastAttempts ? GuardBackoff : GuardInterval;
         if (_lastGuardAt is { } last && now - last < interval) return;
         _lastGuardAt = now; _guardAttempts++;
+        if (_guardAttempts == GuardFastAttempts + 1)
+            RaiseAlert("内屏反复被切走", $"断电期间 Windows 已连续 {GuardFastAttempts} 次把显示切回外接显示器，程序改为每 {GuardBackoff.TotalSeconds:0} 秒重试一次。可按 Win+P 选择“仅电脑屏幕”。");
         Event(LogCategory.Recovery, topo.QuerySucceeded
             ? $"内屏守护：断电期间显示被切回{DisplayModeText.Of(topo.Mode)}（多为 Windows 重新识别到仍保留信号的外接显示器），重新切回内屏（第 {_guardAttempts} 次）"
             : $"内屏守护：断电期间无法读取显示拓扑（{topo.Error}），保守地重新切回内屏（第 {_guardAttempts} 次）", LogResult.Warning);

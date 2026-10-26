@@ -94,19 +94,27 @@ public sealed class TrayIcon : IDisposable
             RecoveryStatus.Normal => LoadIcon("ok", SystemIcons.Shield),
             _ => LoadIcon("warn", SystemIcons.Shield),
         };
-        var text = $"断电护屏 v{AppVersion.Version} · {DisplayModeText.Of(s)}\n电源：{DisplayModeText.Of(snap.Power)}  显示：{DisplayModeText.Of(snap.Topology.Mode)}";
+        var stateText = s == RecoveryStatus.WaitingForExternal && snap.Power != PowerSource.Ac ? "断电保护中（内屏）" : DisplayModeText.Of(s);
+        var text = $"断电护屏 v{AppVersion.Version} · {stateText}\n电源：{DisplayModeText.Of(snap.Power)}  显示：{DisplayModeText.Of(snap.Topology.Mode)}";
         _icon.Text = text.Length > 127 ? text[..127] : text;
 
         if (_lastStatus != null && _lastStatus != s)
         {
             if (s == RecoveryStatus.WaitingForExternal && _lastStatus == RecoveryStatus.SwitchingToInternal)
-                Notify("检测到断电", "已切回笔记本内屏，来电后会在外接显示器稳定可用时尝试恢复。");
+                Notify("检测到断电", "已切回笔记本内屏，断电期间会一直保持内屏。来电后外接显示器稳定可用时自动恢复。");
             else if (s == RecoveryStatus.Normal && _lastStatus == RecoveryStatus.RestoringPreferredMode)
                 Notify("显示模式已恢复", "Windows 已启用首选显示模式。");
             else if (s == RecoveryStatus.RecoveryFailed)
                 Notify("恢复失败", snap.Marker?.LastError ?? "请打开控制台查看详情。", warn: true);
         }
         _lastStatus = s;
+    }
+
+    /// <summary>严重问题：无视“显示系统通知”设置，并播放提示音（屏幕可能看不见时也能听到）。</summary>
+    public void Alert(string title, string text)
+    {
+        try { System.Media.SystemSounds.Hand.Play(); } catch { }
+        Notify(title, text, warn: true, force: true);
     }
 
     public void Notify(string title, string text, bool warn = false, bool force = false)
