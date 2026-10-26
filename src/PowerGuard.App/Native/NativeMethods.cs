@@ -25,6 +25,9 @@ internal static class NativeMethods
     /// <summary>GUID_ACDC_POWER_SOURCE：Data 为 DWORD，0=AC，1=DC（电池），2=短时电源（UPS）。</summary>
     public static readonly Guid GUID_ACDC_POWER_SOURCE = new("5d3e9a59-e9D5-4b00-a6bd-ff34ff516548");
 
+    /// <summary>GUID_LIDSWITCH_STATE_CHANGE：Data 为 DWORD，0=合上，1=打开。注册后 Windows 会立即推送一次当前状态。</summary>
+    public static readonly Guid GUID_LIDSWITCH_STATE_CHANGE = new("BA3E0F4D-B817-4094-A2D1-D56379E6A0F3");
+
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct POWERBROADCAST_SETTING
     {
@@ -159,6 +162,30 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_TARGET_DEVICE_NAME requestPacket);
+
+    // ── 设置显示拓扑（与 Win+P 相同的系统接口） ──
+    public const uint SDC_TOPOLOGY_INTERNAL = 0x00000001;
+    public const uint SDC_TOPOLOGY_CLONE = 0x00000002;
+    public const uint SDC_TOPOLOGY_EXTEND = 0x00000004;
+    public const uint SDC_TOPOLOGY_EXTERNAL = 0x00000008;
+    public const uint SDC_APPLY = 0x00000080;
+
+    /// <summary>SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_*)：按数据库中保存的拓扑切换。</summary>
+    [DllImport("user32.dll")]
+    public static extern int SetDisplayConfig(uint numPathArrayElements, IntPtr pathArray, uint numModeInfoArrayElements, IntPtr modeInfoArray, uint flags);
+
+    // ── 关机 / 注销 ──
+    public const long ENDSESSION_CLOSEAPP = 0x00000001;
+    public const long ENDSESSION_CRITICAL = 0x40000000;
+    public const long ENDSESSION_LOGOFF = 0x80000000;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
 
     // ── 窗口 ──
     public const int SW_RESTORE = 9;

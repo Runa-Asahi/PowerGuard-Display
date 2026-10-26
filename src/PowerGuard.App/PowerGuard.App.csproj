@@ -14,7 +14,8 @@
     <RootNamespace>PowerGuard.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>PowerGuard Display（断电护屏）</Product>
-    <Version>1.0.0</Version>
+    <Version>1.2.1</Version>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <!-- WPF 通过 manifest 声明 PerMonitorV2；WinForms 仅用于托盘 -->
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
@@ -25,6 +26,11 @@
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
     <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 托盘状态图标（由 tools/gen-icons.py 生成）。资源名：PowerGuard.App.Assets.tray-*.ico -->
+    <EmbeddedResource Include="Assets\tray-*.ico" />
   </ItemGroup>
 
   <ItemGroup>

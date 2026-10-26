@@ -1,194 +1,244 @@
-# PowerGuard Display（断电护屏）
+<div align="center">
 
-一个轻量级 Windows 托盘工具：**宿舍断电（市电转电池）时自动切回笔记本内屏；来电后在外接显示器重新被 Windows 识别并稳定一段时间后，自动恢复首选显示模式；断电导致关机的话，下次登录后继续未完成的恢复流程。**
+<img src="docs/images/logo.png" width="96" alt="PowerGuard Display logo" />
 
-- C# / .NET 10 / WPF + XAML，Win32 P/Invoke
-- 不需要管理员权限，不安装驱动，不修改注册表中的显示配置，不联网、不上传任何数据
-- 所有状态都来自真实的 Windows 查询（`GetSystemPowerStatus`、`QueryDisplayConfig` 等），没有任何模拟数据
+# PowerGuard Display · 断电护屏
 
-> ⚠️ **当前版本的状态**：代码已在 Linux 上交叉编译通过并生成 win-x64 发布包，平台无关的状态机/持久化/自启动参数逻辑有 57 个自动化测试全部通过；但**尚未在真实 Windows 机器上运行过**。托盘、电源通知、显示拓扑查询、DisplaySwitch 切屏、任务计划程序都需要在你的电脑上实际验证，见文末“待验证事项”。
+**宿舍断电，自动切回笔记本内屏；来电后，自动恢复外接显示器。**
+
+一个轻量的 Windows 托盘工具：不需要管理员权限、不装驱动、不联网。
+
+[![Release](https://img.shields.io/github/v/release/Runa-Asahi/PowerGuard-Display?label=release&color=005FB8)](https://github.com/Runa-Asahi/PowerGuard-Display/releases/latest)
+[![CI](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml/badge.svg)](https://github.com/Runa-Asahi/PowerGuard-Display/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Runa-Asahi/PowerGuard-Display?color=lightgrey)](#许可)
+[![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet/10.0)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078D4?logo=windows&logoColor=white)](#快速开始)
+
+[下载](#快速开始) · [工作原理](#工作原理) · [设置](#设置) · [常见问题](#常见问题) · [更新记录](docs/CHANGELOG.md) · [设计文档](docs/DESIGN.md)
+
+</div>
 
 ---
 
-## 1. 依赖
+## 为什么需要它
 
-| 用途 | 需要 |
+平时笔记本合盖或只用“仅第二屏幕”。宿舍一断电，外接显示器跟着黑掉，笔记本还开着却**什么都看不见**。PowerGuard Display 会在检测到“市电 → 电池”时立刻切回笔记本内屏；来电、显示器稳定后，再自动切回你习惯的模式。
+
+## ✨ 功能亮点
+
+| | |
 | --- | --- |
-| 运行发布包 | Windows 10 / 11 x64。自包含发布，**不需要**另外安装 .NET 运行时 |
-| 开发构建 | [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（本仓库用 10.0.401 构建；`global.json` 允许 10.0.x 更高版本） |
-| 系统组件 | `%SystemRoot%\System32\DisplaySwitch.exe`、`%SystemRoot%\System32\schtasks.exe`（Windows 自带） |
+| ⚡ **断电自动切内屏** | 确认“市电 → 电池”（2 秒防抖）后切到仅电脑屏幕并校验；**断电期间持续守护**，Windows 把显示切回外接时会自动切回内屏 |
+| 🔁 **来电自动恢复** | 市电恢复且 Windows 稳定识别外接显示器（默认 15 秒）后，恢复首选模式；有重试上限和超时 |
+| 🔌 **关机前切回首选模式** <sup>v1.2</sup> | 关机 / 重启 / 注销前尽力切回首选模式，让下次开机直接进入外接屏；最多约 4 秒，绝不阻止关机 |
+| 💾 **重启也能接着恢复** | 切屏前先原子写入恢复标记，断电关机后再次登录时继续未完成的恢复 |
+| 🛡️ **保守、可预期** | 电源未知时不当作断电；启动时仅因电池供电不会切屏；一切切换都以实际拓扑校验为准 |
+| 🪶 **轻量无打扰** | 托盘常驻；切屏优先用实机验证过的 DisplaySwitch.exe，校验未通过时改用原生 `SetDisplayConfig`；任务计划程序登录自启，无需管理员 |
 
-第三方依赖：无（测试项目使用 xUnit）。
+## 快速开始
 
-## 2. 目录结构
+### 1. 下载
 
-```
-PowerGuardDisplay.sln
-global.json
-publish.ps1                      发布脚本
-src/
-  PowerGuard.Core/               平台无关的类库（net10.0），可在任何系统上测试
-    Models.cs                    电源/显示模式/状态枚举，DisplaySwitch 参数映射
-    Settings.cs                  AppSettings（settings.json）、RecoveryState（recovery-state.json）
-    JsonFileStore.cs             原子写入（临时文件 + Flush + 替换）、损坏文件备份
-    Logging.cs                   滚动日志（按天 + 按大小，JSON Lines）
-    RecoveryCoordinator.cs       断电保护与自动恢复状态机
-    StartupTask.cs               任务计划程序 XML 生成、schtasks 调用与解析
-    Abstractions.cs              IClock / IDelay / IDisplayTopologyProvider / IDisplaySwitcher / IProcessRunner …
-  PowerGuard.App/                WPF 应用（net10.0-windows）
-    Native/NativeMethods.cs      P/Invoke 声明
-    Platform/SystemMonitor.cs    隐藏窗口：RegisterPowerSettingNotification、WM_POWERBROADCAST、WM_DISPLAYCHANGE
-    Platform/DisplayTopologyProvider.cs  QueryDisplayConfig / DisplayConfigGetDeviceInfo
-    Platform/DisplaySwitcher.cs  调用 System32\DisplaySwitch.exe
-    Platform/ProcessRunner.cs    无 shell 拼接的进程调用
-    App.xaml(.cs)                生命周期、单实例、组装各服务
-    TrayIcon.cs                  托盘图标与右键菜单
-    MainWindow.xaml(.cs)         控制台 / 设置 / 运行日志 三个页面
-    Actions.cs                   切屏前确认、失败时给出下一步
-tests/
-  PowerGuard.Core.Tests/         xUnit 测试
-```
+到 [**最新 Release**](https://github.com/Runa-Asahi/PowerGuard-Display/releases/latest) 选择一个包：
 
-## 3. 构建与测试
+| 包 | 大小 | 适合 |
+| --- | --- | --- |
+| `PowerGuardDisplay-<版本>-win-x64-self-contained.zip` | 约 72 MB | **推荐**。自带 .NET 运行时，解压即用 |
+| `PowerGuardDisplay-<版本>-win-x64-framework-dependent.zip` | 约 0.4 MB | 已安装 [.NET 10 Desktop Runtime x64](https://dotnet.microsoft.com/download/dotnet/10.0) 的电脑 |
 
-```powershell
-dotnet build PowerGuardDisplay.sln -c Release
-dotnet test  tests/PowerGuard.Core.Tests -c Release
-```
+可用 Release 附带的 `SHA256SUMS.txt` 校验文件。
 
-在 Linux/macOS 上也能编译（项目已设置 `EnableWindowsTargeting=true`）和运行测试，但 WPF 程序只能在 Windows 上运行。
+### 2. 安装与首次配置
 
-## 4. 发布（自包含单文件）
+1. 把 `PowerGuardDisplay.exe` 放到**固定位置**，例如 `%LOCALAPPDATA%\Programs\PowerGuardDisplay\`（自启动任务记录的是完整路径，移动后需在设置里重新开启一次）。
+2. 双击运行。首次运行会打开控制台，之后默认只在托盘运行。
+3. 打开 **设置**：
+   - **首选显示模式**：平时用“仅第二屏幕”就选 **仅外接显示器**（默认）。
+   - 开启 **当前用户登录后自动启动**，断电关机后第二天登录也能继续恢复。
+4. 在控制台依次点 **立即切回笔记本内屏**、**尝试恢复首选显示模式**，确认两种切换在你的电脑上都生效。
 
-```powershell
-./publish.ps1
-```
+> [!TIP]
+> 关闭主窗口只会隐藏到托盘，后台保护继续。真正退出请用托盘菜单 **退出程序**。再次运行 exe 会打开已有实例的窗口。
 
-等价命令：
+### 托盘图标
 
-```powershell
-dotnet publish src/PowerGuard.App/PowerGuard.App.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
-  -o publish/win-x64
-```
+<img src="docs/images/tray-states.png" height="28" alt="托盘图标：蓝、橙、红、灰" />
 
-产物：`publish/win-x64/PowerGuardDisplay.exe`（约 72 MB，包含 .NET 运行时；`.pdb` 为调试符号，可不复制）。
+**蓝** 正常 · **橙** 流程进行中（断电保护 / 等待恢复）· **红** 恢复失败或监听未运行 · **灰** 已暂停（可选“暂停 1 小时”，到时自动恢复）
 
-## 5. 运行与首次配置
+## 工作原理
 
-1. 把 `PowerGuardDisplay.exe` 复制到**固定位置**，例如 `%LOCALAPPDATA%\Programs\PowerGuardDisplay\`。自启动任务会指向 exe 的实际路径，以后移动 exe 需要重新开一次自启动（程序启动时也会检测并修正）。
-2. 双击运行。首次运行会打开控制台窗口；之后启动默认只在托盘运行。
-3. 打开“设置”：
-   - **首选显示模式**：你平时用“仅第二屏幕”，就选 **仅外接显示器（external）**（默认值）。
-   - 开启 **当前用户登录后自动启动**，这样断电关机后第二天登录也能继续恢复。
-   - 其他值默认即可：稳定等待 15 秒、恢复超时 30 分钟、重试间隔 20 秒、最多重试 3 次。
-4. 建议先手动测试：在控制台点“立即切回笔记本内屏”，再点“尝试恢复首选显示模式”，确认两种切换在你的电脑上都生效（见 §8）。
+```mermaid
+flowchart TD
+    N([正常运行]) -->|市电 → 电池<br/>2 秒后仍是电池| M[写入恢复标记]
+    M --> I[切到仅电脑屏幕<br/>并查询拓扑校验]
+    I --> W{{等待外接显示器}}
+    W -->|仍是电池| W
+    W -->|市电恢复，外接路径<br/>连续可用 ≥ 稳定时间| R[恢复首选模式<br/>并校验]
+    R -->|校验通过 → 清除标记| N
+    R -->|条件消失 / 用户中断| W
+    R -->|重试用尽或超时| F[恢复失败<br/>保留标记，确保内屏]
+    F -->|手动恢复 / 下次断电| W
 
-- 关闭主窗口只会隐藏到托盘，后台保护继续运行；**真正退出请用托盘菜单“退出程序”**。
-- 再次运行 exe 不会启动第二个实例，而是打开已有实例的窗口。
-
-数据位置：`%LOCALAPPDATA%\PowerGuardDisplay\`
-- `settings.json`：配置
-- `recovery-state.json`：未完成的恢复标记（文件存在 = 有未完成的流程）
-- `logs\powerguard-yyyyMMdd.log`：日志（JSON Lines，单文件 2 MB 滚动，默认保留 14 天）
-
-## 6. 工作原理
-
-### 6.1 状态机
-
-```
-Normal ──市电→电池(确认 2 秒仍为电池)──► PowerLossDetected
-   ▲                                       │ 先原子写入 recovery-state.json
-   │                                       ▼
-   │                               SwitchingToInternal ── DisplaySwitch 内屏 → 重新查询拓扑校验
-   │                                       ▼
-   │                               WaitingForExternal ◄──────────────┐
-   │       （仍是电池：保持内屏，不因显示器波动切屏）                  │ 重试前条件不满足 / 用户中断
-   │       （市电恢复：等待外接路径连续可用 ≥ 稳定时间，路径消失则重新计时）│
-   │                                       ▼                          │
-   └──校验模式 = 首选 才清除标记── RestoringPreferredMode ─────────────┘
-                                           │ 1 + 最大重试次数 次均失败 / 市电恢复后超时
-                                           ▼
-                                    RecoveryFailed（保留标记，确保内屏活动，不再自动切屏）
-Paused：用户暂停，忽略断电事件，不自动恢复；恢复保护后回到 Normal 或 WaitingForExternal
+    S([关机 / 重启 / 注销]) --> D{市电？外接可用？<br/>不是首选模式？}
+    D -->|是| A[≤4 秒切到首选模式]
+    D -->|否| K[跳过，记录原因]
 ```
 
-要点：
-- **未知电源状态绝不当作断电**；只有“市电 → 电池”的确认转换才触发保护。
-- **启动时只因为是电池供电，不会切屏**；只有存在恢复标记才继续流程。
-- 恢复标记写入在切屏**之前**；清除恢复标记在**确认**当前模式等于首选模式**之后**。
-- 调用 DisplaySwitch.exe 后等待 4 秒（`VerifyDelaySeconds`）再用 `QueryDisplayConfig` 校验，进程启动成功不算切换成功。
-- 所有切屏操作串行执行（防重入），不在 UI 线程上等待。
-- 恢复失败后不会无限循环：自动尝试次数 = 1 + 最大重试次数；超时后停止，等待用户手动操作或下一次断电/重启。
-- 用户手动“切回内屏”/“恢复首选模式”/“暂停”会中断正在进行的自动恢复等待。
-- 恢复标记文件损坏时按“有未完成流程”处理（宁可继续保护内屏），首选模式取当前设置。
+- **断电期间守护内屏**：断电瞬间外接显示器会短暂消失，随后可能又被 Windows 识别（显示器仍保留 EDID），Windows 会按上次的配置切回“仅第二屏幕”。程序在断电期间持续检查，一旦内屏不在显示就重新切回（前 6 次至少间隔 5 秒，之后每 60 秒一次，并发出提示音和通知）。断电期间**绝不**自动切到外接。
+- **只认“市电 → 电池”**：笔记本没接电源，或电池耗尽直接关机时，无法触发保护。
+- **“检测到路径” ≠ “显示器亮了”**：程序只能知道 Windows 是否认为外接目标可用。有些显示器断电后仍保留 EDID 信号，所以只在**市电恢复后**才开始稳定计时。
+- **关机前恢复只在安全时执行**：接市电、检测到外接显示路径、当前不是首选模式、没有暂停、不在恢复失败或切屏过程中。重启管理器（安装更新）只要求关闭程序时不会触发。恢复标记不改动，下次开机如果已是首选模式，会直接确认并清除标记。
 
-### 6.2 电源检测
+状态机、电源和显示检测、自启动任务等细节见 [docs/DESIGN.md](docs/DESIGN.md)。
 
-隐藏的顶层窗口通过 `RegisterPowerSettingNotification(GUID_ACDC_POWER_SOURCE)` 接收 `WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE`（数据 0 = 市电，1 = 电池，2 = 短时电源/UPS → 按未知处理），同时处理 `PBT_APMPOWERSTATUSCHANGE`、睡眠恢复。启动时和每 3 秒用 `GetSystemPowerStatus` 兜底校验，重复的通知会被去重。退出时调用 `UnregisterPowerSettingNotification`。
+## 可选增强
 
-### 6.3 显示检测
+- **盖子感知**：断电且合盖时不反复切屏，开盖立刻点亮内屏。
+- **崩溃自动重启**（默认开启）：每小时最多 3 次。
+- **实验：DDC/CI 恢复校验**（默认关闭）：适合“来电后显示器仍未真正上电，却被 Windows 当作在线”的情况，需要在显示器 OSD 中开启 DDC/CI。
 
-`QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)` 读取活动路径，用 `outputTechnology` 区分内屏（INTERNAL / LVDS / 内嵌 DP / 内嵌 UDI）和外接屏，并推导当前模式（内外屏同源为“复制”，不同源为“扩展”）。`QueryDisplayConfig(QDC_ALL_PATHS)` 中 `targetAvailable = TRUE` 的外接目标被视为“Windows 检测到外接显示路径”。通过 `WM_DISPLAYCHANGE` 触发检查，再加每 3 秒一次的低频轮询。
+## 设置
 
-### 6.4 自启动
+设置页可以修改：
 
-使用 `schtasks.exe /Create /XML`，任务名 `PowerGuardDisplay`：
-- 触发器：**仅当前用户**登录（`LogonTrigger` + `UserId`），延迟 10 秒
-- 以当前用户、`InteractiveToken`、`LeastPrivilege` 运行，不需要管理员，不是 Windows 服务
-- `DisallowStartIfOnBatteries=false`、`StopIfGoingOnBatteries=false`：电池供电时也能启动，断电时不会被任务计划程序停止
-- `MultipleInstancesPolicy=IgnoreNew`；`RestartOnFailure` 最多 3 次、间隔 1 分钟。这个重启只在任务启动失败时生效，用户从托盘正常退出（退出码 0）不会被重新拉起
-- 设置页关闭自启动会删除该任务；偏好关闭时，程序重启也不会自己再创建
+| 设置 | 默认 | 说明 |
+| --- | --- | --- |
+| 首选显示模式 | 仅外接显示器 | 恢复和关机前切换的目标：仅笔记本屏幕 / 仅外接显示器 / 扩展 / 复制 |
+| 断电时自动切回内屏 | 开 | 关闭后只记录、不切屏 |
+| 来电后自动恢复 | 开 | 关闭后需要手动点“尝试恢复首选显示模式” |
+| 关机 / 重启 / 注销前切回首选模式 | 开 | 仅在接市电、外接显示器已稳定可用时执行，最多约 4 秒 |
+| 稳定等待时间 | 15 秒 | 外接路径连续可用多久才恢复（3–600） |
+| 恢复超时 | 30 分钟 | 市电恢复后多久仍未成功就停止（1–1440） |
+| 重试间隔 / 最多重试 | 20 秒 / 3 次 | 间隔 5–3600 秒，重试 0–10 次；总尝试次数 = 1 + 最多重试 |
+| 登录后自动启动 | 关 | 任务计划程序，仅当前用户、无需管理员 |
+| 系统通知 / 保留日志 | 开 / 开 | 日志保留 14 天；关闭后只保留当天 |
 
-## 7. 故障排查
+<details>
+<summary><b>高级：只能在 <code>settings.json</code> 中修改的项</b></summary>
 
-| 现象 | 处理 |
-| --- | --- |
-| 切屏后内外屏都没有画面 | 按 **Win+P** 选“仅电脑屏幕”；或按 **Win+Ctrl+Shift+B** 重置显卡驱动；或从托盘菜单点“切回笔记本内屏” |
-| 点切换后只弹出 Windows 的“投影”菜单、没有真正切换 | Windows 11 的 DisplaySwitch.exe 参数格式变了（见 §8.1）。到 `settings.json` 把 `"DisplaySwitchArgStyle"` 从 `"Auto"` 改为 `"Numeric"` 或 `"Slash"`，然后重启程序 |
-| 控制台显示“恢复失败” | 看“最近错误”和运行日志。确认显示器已通电、HDMI 已插好，在“设置 > 系统 > 屏幕”点“检测”，然后点“尝试恢复首选显示模式” |
-| 外接显示器断电了，却仍显示“已识别” | 有些显示器断电后仍保留 EDID/热插拔信号，Windows 会继续报告这条路径。程序只在**市电恢复后**才开始稳定计时，所以一般不受影响；如果仍然太早恢复，可以把“稳定等待时间”调大 |
-| 自启动开启失败 | 界面会显示 schtasks 的错误信息。按 Win+R 输入 `taskschd.msc` 查看任务计划程序库里的 `PowerGuardDisplay`，或运行 `schtasks /Query /TN PowerGuardDisplay /V /FO LIST`。公司/学校电脑的组策略可能禁止普通用户创建任务 |
-| 托盘图标不见了 | 可能被收进了任务栏溢出区；再次运行 exe 会打开已有实例的窗口 |
-| 配置丢失或程序行为异常 | `settings.json` 损坏时，程序会改名备份为 `settings.json.corrupt-时间戳` 并使用默认值，日志中有记录 |
-| 想重置 | 从托盘退出程序，删除 `%LOCALAPPDATA%\PowerGuardDisplay\`，再在设置页重新开启一次自启动 |
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `SwitchMethod` | `Auto` | `Auto`：先 DisplaySwitch.exe（v1.0.0 实机验证），启动失败或第二次尝试时用 SetDisplayConfig；`Native`；`DisplaySwitch` |
+| `DisplaySwitchArgStyle` | `Auto` | 回退到 DisplaySwitch.exe 时的参数风格：`Auto`（Win11 用数字）/ `Slash` / `Numeric` |
+| `VerifyDelaySeconds` | `4` | 切换后等待多久再校验（1–30） |
+| `PowerLossConfirmSeconds` | `2` | 断电防抖时间（0–30） |
 
-## 8. 局限与待验证事项（务必阅读）
+数据目录：`%LOCALAPPDATA%\PowerGuardDisplay\`
+- `settings.json`：配置（旧版本会自动迁移）
+- `recovery-state.json`：未完成的恢复标记（文件存在就表示有未完成的流程）
+- `logs\powerguard-yyyyMMdd.log`：JSON Lines 日志，单文件 2 MB 滚动
 
-### 8.1 DisplaySwitch.exe 参数（需要实机确认）
-Windows 10 的 `DisplaySwitch.exe` 接受 `/internal /external /extend /clone`。据 Microsoft Q&A 社区的反馈（[链接](https://learn.microsoft.com/en-us/answers/questions/1036148/displayswitch-exe-behavior-on-windows-11-22h2)），**Windows 11 22H2 起内置版本改为数字参数**：`1`=内屏、`2`=复制、`3`=扩展、`4`=外接，传 `/xxx` 只会弹出“投影”菜单。微软没有为这个工具发布官方参数文档。因此：
-- 默认 `DisplaySwitchArgStyle = Auto`：系统 build ≥ 22000（Windows 11）用数字参数，否则用 `/xxx` 参数；
-- 不论用哪种参数，每次切换后都会重新查询拓扑来校验；校验没通过就记为失败，不会当作成功；
-- 如果你的系统表现不一样，在 `settings.json` 里手动指定 `"Slash"` 或 `"Numeric"`。
+</details>
 
-### 8.2 “检测到显示路径” ≠ “显示器亮了”
-程序能确认的只是 **Windows 是否认为外接目标可用、是否处于活动状态**。显示器是否真的通电、是否有画面，没有可靠的 API 能判断。界面上的“外接显示器（Windows 识别）”就是这个意思。恢复“成功”表示 Windows 已启用首选模式，实际画面请自己确认。
+## 常见问题
 
-### 8.3 其他限制
-- 只有电源适配器真正断电（市电转电池）才能被检测到。如果宿舍断电时笔记本**没有接电源**，或者电池已经耗尽导致直接关机，就不会触发保护。
-- 如果在恢复标记写入前电脑就已经关机（几乎不可能，写入发生在检测到断电的约 2 秒后），下次启动没有标记，程序不会擅自恢复外接模式，需要你手动操作。
-- “暂停保护”只在本次运行中有效，不写入配置，重启程序后恢复保护。
-- 首选模式快照在断电时保存。断电期间改了首选模式，只对下一次断电生效。
-- 托盘图标用的是系统自带图标（盾牌 / 警告 / 信息），暂时没有自定义图标。
+<details>
+<summary><b>升级后界面还是显示旧版本号 / 看不到新功能</b></summary>
 
-### 8.4 已验证 / 未验证
+一般是旧版本还在托盘里运行。v1.2.0 首次发布的包和更早的版本中，再次运行 exe 只会唤醒已有实例的窗口，所以看到的其实是旧程序。现在的版本会检测到“另一个版本正在运行”，并询问是否替换。如果仍有问题，从托盘菜单 **退出程序**，在任务管理器确认没有 `PowerGuardDisplay.exe` 后再运行新版本。左下角版本号带有构建提交，例如 `v1.2.0 (abc1234)`。开启了登录自启动的话，新版本启动时会把任务改为指向当前 exe。
+</details>
+
+<details>
+<summary><b>断电后内屏一直是黑的</b></summary>
+
+先按 **Win+P** 选“仅电脑屏幕”。这是 v1.2.0 的已知问题，已在 v1.2.1 修复：外接显示器断电后仍被 Windows 识别，Windows 自动切回了“仅第二屏幕”。新版本会在断电期间持续守护内屏，并在无法保持时发出提示音。日志里搜“内屏守护”可以看到每次纠正。
+</details>
+
+<details>
+<summary><b>停电期间开机 / 合盖 / 睡眠后会怎样</b></summary>
+
+- 停电时开机：若 Windows 只点亮了外接显示器（内屏是黑的），程序启动后会按断电处理并切回内屏，来电后自动恢复（需开启登录自启动）。
+- 断电时合着盖子：不会反复切屏；开盖后立即切回内屏。
+- 从睡眠 / 休眠唤醒：重新读取电源与显示状态，必要时继续保护内屏。
+</details>
+
+<details>
+<summary><b>切屏后内外屏都没有画面</b></summary>
+
+按 **Win+P** 选“仅电脑屏幕”；或按 **Win+Ctrl+Shift+B** 重置显卡驱动；或从托盘菜单点 **切回笔记本内屏**。
+</details>
+
+<details>
+<summary><b>关机后下次开机仍在内屏</b></summary>
+
+看日志里“关机前恢复”那几行的跳过原因（例如当时是电池供电、没检测到外接显示器）。Windows 快速启动、显卡驱动在开机时重新检测显示器，也可能让它不生效。这个功能是“尽力而为”。
+</details>
+
+<details>
+<summary><b>日志显示 “SetDisplayConfig 返回 …”</b></summary>
+
+显卡驱动拒绝了原生切换（一般只在第二次尝试时用到）。想只用 DisplaySwitch，把 `settings.json` 的 `"SwitchMethod"` 改为 `"DisplaySwitch"`。
+</details>
+
+<details>
+<summary><b>切换时只弹出 Windows 的“投影”菜单（仅回退到 DisplaySwitch 时）</b></summary>
+
+Windows 11 22H2 起 DisplaySwitch.exe 改用数字参数。程序会在 15 秒后关掉菜单。可以把 `"DisplaySwitchArgStyle"` 改为 `"Numeric"` 或 `"Slash"` 后重启程序。
+</details>
+
+<details>
+<summary><b>控制台显示“恢复失败”</b></summary>
+
+看“最近事件”和运行日志。确认显示器已通电、HDMI 已插好，在 Windows“设置 > 系统 > 屏幕”点“检测”，再点 **尝试恢复首选显示模式**。
+</details>
+
+<details>
+<summary><b>外接显示器断电了，却仍显示“已识别”</b></summary>
+
+有些显示器断电后仍保留 EDID / 热插拔信号。程序只在市电恢复后才开始稳定计时，一般不受影响；如果恢复得太早，把“稳定等待时间”调大。
+</details>
+
+<details>
+<summary><b>自启动开启失败 / 托盘图标不见了 / 想重置</b></summary>
+
+- **自启动**：界面会显示 schtasks 的错误。Win+R 输入 `taskschd.msc` 查看 `PowerGuardDisplay` 任务，或运行 `schtasks /Query /TN PowerGuardDisplay /V /FO LIST`。公司 / 学校电脑的组策略可能禁止创建任务。
+- **托盘图标**：可能在任务栏溢出区；再次运行 exe 会打开已有窗口。
+- **配置损坏**：会改名备份为 `settings.json.corrupt-时间戳` 并使用默认值；文件被占用时不会被覆盖。
+- **重置**：从托盘退出，删除 `%LOCALAPPDATA%\PowerGuardDisplay\`，再在设置页重新开启自启动。
+</details>
+
+## 实机验证
+
+自动化测试在 GitHub Actions（windows-latest）上运行，覆盖状态机、持久化、关机前决策、拓扑推导和并发，**但 CI 不能代替真实硬件**。
+
+<details>
+<summary><b>验证状态与人工测试步骤</b></summary>
+
 | 项目 | 状态 |
 | --- | --- |
-| 编译（Linux 交叉编译 Release，0 警告 0 错误） | ✅ 已验证 |
-| win-x64 自包含单文件发布 | ✅ 已生成（未在 Windows 上启动过） |
-| 状态机、持久化、日志滚动、自启动 XML/参数、DisplaySwitch 参数映射（57 个 xUnit 测试，用假实现替代系统调用） | ✅ 已通过 |
-| P/Invoke 结构体大小（72 / 64 / 420 / 12 字节）与偏移 | ✅ 已测试（与 Windows SDK 定义对照） |
-| 程序在 Windows 上启动、托盘、窗口、DPI 缩放 | ⏳ 需要在 Windows 上验证 |
-| `RegisterPowerSettingNotification` 实际收到拔插电源事件 | ⏳ 需要实机：拔掉电源适配器测试 |
-| `QueryDisplayConfig` 在 Y7000 IRX10 上的内屏识别（outputTechnology）和模式推导 | ⏳ 需要实机 |
-| DisplaySwitch.exe 四种模式在你的 Windows 版本上实际生效 | ⏳ 需要实机（§8.1） |
-| schtasks 普通用户创建登录任务、登录后自动启动 | ⏳ 需要实机 |
-| 真实断电、HDMI 重连、显示器亮屏时间 | ⏳ 只能人工测试 |
+| Release 构建（警告视为错误）、两种 win-x64 包 | ✅ CI |
+| 96 个 xUnit 测试（假实现替代系统调用） | ✅ CI |
+| P/Invoke 结构体大小与偏移 | ✅ 测试 |
+| 市电转电池 → 切回内屏（1.0.0 行为） | ✅ 用户实机确认 |
+| 启动、托盘、窗口、高 DPI 下的图标 | ⏳ 需实机 |
+| SetDisplayConfig 四种拓扑在 Y7000 IRX10 上生效；DisplaySwitch 回退 | ⏳ 需实机 |
+| 关机前切回首选模式，下次开机直接进入首选拓扑 | ⏳ 需实机 |
+| schtasks 登录自启动 | ⏳ 需实机 |
 
-### 8.5 建议的人工测试步骤
-1. 接市电、“仅第二屏幕”模式下启动 → 控制台应显示：市电 / 仅第二屏幕 / 外接已识别·显示中 / 正常运行。
-2. **拔掉笔记本电源适配器**（模拟断电，显示器保持通电）→ 约 2–6 秒后应切到内屏，状态变为“等待外接显示器”，`recovery-state.json` 出现。
-3. 插回电源适配器 → 约 15 秒稳定期后恢复“仅第二屏幕”，标记文件消失。
-4. 重复第 2 步，然后关掉显示器电源、插回电源适配器，观察是否等待；再打开显示器，确认恢复。
-5. 在第 2 步之后从托盘退出程序、重启电脑并接市电登录 → 应提示发现未完成的恢复标记并继续恢复。
-6. 开启/关闭自启动，在 `taskschd.msc` 中确认任务被创建/删除；从托盘退出后，确认程序不会被自动拉起。
+**建议步骤**
+1. 接市电、“仅第二屏幕”下启动，控制台应显示：市电 / 仅第二屏幕 / 外接已识别·显示中 / 正常运行。
+2. **拔掉电源适配器**（显示器保持通电）：约 2–6 秒后切到内屏，状态变为“等待外接显示器”，出现 `recovery-state.json`。
+3. 插回电源适配器：约 15 秒后恢复“仅第二屏幕”，标记文件消失。
+4. 重复第 2 步，先关掉显示器再插回电源适配器，应该一直等待；打开显示器后恢复。
+5. 第 2 步之后从托盘退出、重启并接市电登录：应提示发现未完成的恢复标记，并继续恢复。
+6. 开启 / 关闭自启动，在 `taskschd.msc` 里确认任务被创建 / 删除；从托盘退出后，程序不应被重新拉起。
+7. **关机前恢复**：接市电、开着显示器，用 Win+P 切到“仅电脑屏幕”后**重启**。日志应出现“关机前恢复成功”，开机后登录界面直接出现在外接显示器上。再用电池供电重复一次，日志应显示“跳过（当前电源为电池…）”。
+
+</details>
+
+## 开发
+
+```powershell
+dotnet build PowerGuardDisplay.slnx -c Release
+dotnet test  tests/PowerGuard.Core.Tests -c Release
+./publish.ps1 -Zip        # 输出 publish/win-x64（自包含）与 publish/win-x64-fd（依赖框架）
+```
+
+需要 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。Linux / macOS 也能编译和跑测试（`EnableWindowsTargeting`），但 WPF 程序只能在 Windows 上运行。目录结构、状态机和平台调用细节见 [docs/DESIGN.md](docs/DESIGN.md)，版本历史见 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+
+## 许可
+
+仓库目前未附带许可证文件，保留所有权利。
+
+<div align="center"><sub>C# · .NET 10 · WPF · Win32 P/Invoke — 所有状态来自真实的 Windows 查询，无模拟数据，不上传任何数据。</sub></div>

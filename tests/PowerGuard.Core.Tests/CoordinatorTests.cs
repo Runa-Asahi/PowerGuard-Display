@@ -15,14 +15,38 @@ public class CoordinatorTests
     }
 
     [Fact] // 用例 3
-    public async Task StartOnBattery_NoMarker_DoesNotSwitch()
+    public async Task StartOnBattery_NoMarker_InternalLit_DoesNotSwitch()
     {
         var h = new Harness();
+        h.Display.Mode = DisplayMode.Extend; // 内屏已点亮
         await h.C.InitializeAsync(PowerSource.Battery);
         await h.RunFor(60);
         Assert.Equal(RecoveryStatus.Normal, h.C.Status);
         Assert.Empty(h.Display.Launches);
         Assert.Null(h.Store.State);
+    }
+
+    [Fact] // 停电期间开机：Windows 只点亮（没电的）外接显示器
+    public async Task StartOnBattery_NoMarker_ExternalOnly_EntersPowerLossFlow()
+    {
+        var h = new Harness();
+        await h.C.InitializeAsync(PowerSource.Battery);
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+        Assert.Equal(RecoveryStatus.WaitingForExternal, h.C.Status);
+        Assert.NotNull(h.Store.State);
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Ac);
+        await h.RunFor(60);
+        Assert.Equal(DisplayMode.External, h.Display.Mode);
+        Assert.Equal(RecoveryStatus.Normal, h.C.Status);
+    }
+
+    [Fact]
+    public async Task StartOnBattery_NoMarker_ExternalOnly_AutoSwitchDisabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings = h.Settings with { AutoSwitchOnPowerLoss = false };
+        await h.C.InitializeAsync(PowerSource.Battery);
+        Assert.Empty(h.Display.Launches);
     }
 
     [Fact] // 用例 4

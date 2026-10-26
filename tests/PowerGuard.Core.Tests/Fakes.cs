@@ -41,8 +41,10 @@ public sealed class FakeDisplay : IDisplayTopologyProvider, IDisplaySwitcher
             $"{mode}|{ExternalConnected}");
     }
 
-    public Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct)
+    public List<bool> Alternates { get; } = new();
+    public Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct, bool alternate = false)
     {
+        Alternates.Add(alternate);
         BeforeLaunch?.Invoke(mode);
         Launches.Add(mode);
         if (LaunchFails) return Task.FromResult(SwitchLaunchResult.Fail("模拟：找不到文件"));

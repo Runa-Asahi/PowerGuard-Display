@@ -16,17 +16,22 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<LogEntry> _logs = new();
     private readonly ICollectionView _logView;
     private readonly DispatcherTimer _refresh;
+    private readonly DispatcherTimer _searchDebounce;
     private bool _busy;
 
     public MainWindow()
     {
         InitializeComponent();
-        VersionText.Text = $"v{typeof(App).Assembly.GetName().Version?.ToString(3)}";
+        VersionText.Text = AppVersion.Display;
+        VersionText.ToolTip = $"断电护屏 {AppVersion.Display}\n{App.ExePath}";
+        Title = $"{Title} {AppVersion.Display}";
 
-        foreach (var e in _app.Log.Recent) _logs.Add(e);
+        // 集合本身按“新 → 旧”维护：新条目 Insert(0)、超量从末尾删除，不使用 SortDescription（避免每条日志都整体重排）
+        foreach (var e in _app.Log.Recent.Reverse()) _logs.Add(e);
         _logView = CollectionViewSource.GetDefaultView(_logs);
         _logView.Filter = LogFilter;
-        _logView.SortDescriptions.Add(new SortDescription(nameof(LogEntry.Time), ListSortDirection.Descending));
+        _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _searchDebounce.Tick += (_, _) => { _searchDebounce.Stop(); _logView.Refresh(); };
         LogGrid.ItemsSource = _logView;
         LogCategoryFilter.ItemsSource = new[] { "全部类型" }.Concat(Enum.GetValues<LogCategory>().Select(c => new LogEntry(default, c, "", default).CategoryText)).ToList();
         LogCategoryFilter.SelectedIndex = 0;
@@ -38,9 +43,15 @@ public partial class MainWindow : Window
         _app.StartupStatusChanged += (_, _) => Refresh();
         LoadSettingsToUi();
 
-        // 计时显示（稳定倒计时等）每秒刷新，只读取内存快照
+        // 状态变化由 StateChanged 事件驱动刷新；这个每秒定时器只在有倒计时需要显示时才刷新
         _refresh = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _refresh.Tick += (_, _) => { if (IsVisible) Refresh(); };
+        _refresh.Tick += (_, _) =>
+        {
+            if (!IsVisible) return;
+            var snap = _app.Coordinator.Snapshot();
+            if (snap.ExternalStableSince != null || snap.PausedUntil != null) Refresh();
+        };
+        IsVisibleChanged += (_, _) => { if (IsVisible) Refresh(); };
         _refresh.Start();
         SizeChanged += (_, _) => StatusGrid.Columns = ActualWidth < 980 ? 2 : 4;
         Refresh();
@@ -50,8 +61,8 @@ public partial class MainWindow : Window
 
     private void OnLogEntry(LogEntry e) => Dispatcher.BeginInvoke(() =>
     {
-        _logs.Add(e);
-        if (_logs.Count > FileLogger.MaxRecent) _logs.RemoveAt(0);
+        _logs.Insert(0, e);
+        if (_logs.Count > FileLogger.MaxRecent) _logs.RemoveAt(_logs.Count - 1);
     });
 
     protected override void OnClosing(CancelEventArgs e)
@@ -65,6 +76,7 @@ public partial class MainWindow : Window
         _app.Log.EntryAdded -= OnLogEntry;
         _app.Coordinator.StateChanged -= OnStateChanged;
         _refresh.Stop();
+        _searchDebounce.Stop();
         base.OnClosing(e);
     }
 
@@ -116,15 +128,27 @@ public partial class MainWindow : Window
         var ss = _app.StartupStatus;
         StartupText.Text = ss is null ? "检查中…" : ss.Error != null && !ss.Exists ? "检查失败" : !ss.Exists ? (st.StartWithWindows ? "未创建（异常）" : "未开启") : !ss.Enabled ? "任务已禁用" : ss.PointsToCurrentExe ? "已开启" : "已开启（指向其他位置）";
 
+        var sw = StartupAdvice.Warning(ss);
+        StartupWarning.Text = sw ?? "";
+        StartupWarning.Visibility = sw is null ? Visibility.Collapsed : Visibility.Visible;
+
         // 横幅
         string title, detail; Brush dot;
         switch (snap.Status)
         {
-            case RecoveryStatus.Paused: title = "自动保护已暂停"; detail = "不会响应断电，也不会自动恢复。可随时手动切屏。"; dot = B("Warn"); break;
+            case RecoveryStatus.Paused:
+                title = "自动保护已暂停";
+                detail = (snap.PausedUntil is { } pu ? $"将于 {pu:HH:mm} 自动恢复保护。" : "") + "不会响应断电，也不会自动恢复。可随时手动切屏。";
+                dot = B("Warn"); break;
             case RecoveryStatus.RecoveryFailed: title = "恢复失败，正在使用内屏"; detail = (snap.Marker?.LastError ?? "") + "  可点击“尝试恢复首选显示模式”重试。"; dot = B("Bad"); break;
             case RecoveryStatus.WaitingForExternal:
-                title = "断电保护中：等待外接显示器";
-                if (snap.Power != PowerSource.Ac) detail = "当前未接市电，保持笔记本内屏显示。来电后会等待外接显示路径稳定再恢复。";
+                title = snap.Power != PowerSource.Ac ? "断电保护中：正在使用笔记本内屏" : "已来电：等待外接显示器";
+                if (snap.Power != PowerSource.Ac)
+                    detail = snap.LidOpen == false
+                        ? "当前未接市电，笔记本盖子已合上：开盖后会立即切回内屏。"
+                        : "当前未接市电。程序会一直保持内屏点亮（Windows 若把显示切回外接会自动切回来）" +
+                          (snap.GuardAttempts > 0 ? $"，本次已纠正 {snap.GuardAttempts} 次" : "") +
+                          "。来电后等外接显示器稳定再恢复。";
                 else if (!st.AutoRestoreOnPowerReturn) detail = "已来电，但自动恢复已禁用，请手动恢复。";
                 else if (snap.ExternalStableSince is { } since)
                 {
@@ -149,6 +173,7 @@ public partial class MainWindow : Window
             : "无未完成的恢复流程";
         BtnDiscard.Visibility = snap.Marker != null ? Visibility.Visible : Visibility.Collapsed;
         BtnPause.Content = snap.Paused ? "恢复自动保护" : "暂停自动保护";
+        BtnPause1h.Visibility = snap.Paused ? Visibility.Collapsed : Visibility.Visible;
         BtnInternal.IsEnabled = BtnRestore.IsEnabled = !_busy;
     }
 
@@ -172,6 +197,7 @@ public partial class MainWindow : Window
     private async void BtnInternal_Click(object s, RoutedEventArgs e) => await Run(() => Actions.SwitchInternal(this));
     private async void BtnRestore_Click(object s, RoutedEventArgs e) => await Run(() => Actions.RestorePreferred(this));
     private async void BtnPause_Click(object s, RoutedEventArgs e) => await _app.Coordinator.SetPausedAsync(!_app.Coordinator.Paused);
+    private async void BtnPause1h_Click(object s, RoutedEventArgs e) => await _app.Coordinator.SetPausedAsync(true, TimeSpan.FromHours(1));
     private async void BtnDiscard_Click(object s, RoutedEventArgs e)
     {
         if (MessageBox.Show(this, "放弃后将清除恢复标记，程序不会再自动恢复外接显示器（不会切换当前显示）。\n确定放弃吗？", "放弃未完成的恢复",
@@ -188,6 +214,9 @@ public partial class MainWindow : Window
         SStartup.IsChecked = s.StartWithWindows;
         SNotify.IsChecked = s.ShowNotifications;
         SRetainLogs.IsChecked = s.RetainLogs;
+        SRestoreOnShutdown.IsChecked = s.RestoreOnShutdown;
+        SRelaunch.IsChecked = s.RelaunchAfterCrash;
+        SVerifyDdc.IsChecked = s.VerifyRestoreWithDdc;
         SStability.Text = s.StabilitySeconds.ToString();
         STimeout.Text = s.RecoveryTimeoutMinutes.ToString();
         SRetryInterval.Text = s.RetryIntervalSeconds.ToString();
@@ -207,11 +236,14 @@ public partial class MainWindow : Window
     private async void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
         var errors = new List<string>();
-        var n = _app.Settings.Clone();
+        var n = _app.Settings.Copy();
         n.AutoSwitchOnPowerLoss = SAutoSwitch.IsChecked == true;
         n.AutoRestoreOnPowerReturn = SAutoRestore.IsChecked == true;
         n.ShowNotifications = SNotify.IsChecked == true;
         n.RetainLogs = SRetainLogs.IsChecked == true;
+        n.RestoreOnShutdown = SRestoreOnShutdown.IsChecked == true;
+        n.RelaunchAfterCrash = SRelaunch.IsChecked == true;
+        n.VerifyRestoreWithDdc = SVerifyDdc.IsChecked == true;
         if (ReadInt(SStability, 3, 600, "稳定等待时间", errors, out var a)) n.StabilitySeconds = a;
         if (ReadInt(STimeout, 1, 1440, "恢复超时时间", errors, out var b)) n.RecoveryTimeoutMinutes = b;
         if (ReadInt(SRetryInterval, 5, 3600, "重试间隔", errors, out var c)) n.RetryIntervalSeconds = c;
@@ -240,6 +272,7 @@ public partial class MainWindow : Window
         {
             var modeChanged = n.PreferredMode != _app.Settings.PreferredMode;
             _app.Settings = n;
+            _app.Log.RetainLogs = n.RetainLogs;
             _app.Log.Log(LogCategory.Settings, $"设置已保存（首选模式 {DisplayModeText.Of(n.PreferredMode)}，稳定 {n.StabilitySeconds}s，超时 {n.RecoveryTimeoutMinutes}min，重试 {n.MaxRetries}×{n.RetryIntervalSeconds}s）", LogResult.Success);
             SettingsResult.Foreground = B("Ok");
             SettingsResult.Text = "设置已保存。" + msg + (modeChanged ? "首选模式已更新，未切换当前显示。" : "");
@@ -259,6 +292,7 @@ public partial class MainWindow : Window
     }
 
     private void LogFilter_Changed(object s, EventArgs e) => _logView?.Refresh();
+    private void LogSearch_Changed(object s, EventArgs e) { _searchDebounce?.Stop(); _searchDebounce?.Start(); }
 
     private void CopySelectedLogs_Click(object s, RoutedEventArgs e) =>
         CopyLines(LogGrid.SelectedItems.Cast<LogEntry>());

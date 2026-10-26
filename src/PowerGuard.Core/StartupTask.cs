@@ -17,11 +17,13 @@ public sealed class StartupTaskService
     public const string AutostartArg = "--autostart";
     private readonly IProcessRunner _runner;
     private readonly string _schtasks;
+    private readonly string _tempDir;
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
-    public StartupTaskService(IProcessRunner runner, string schtasksPath)
+    /// <param name="tempDir">临时任务 XML 的存放目录。默认使用程序自己的数据目录而不是公共 %TEMP%。</param>
+    public StartupTaskService(IProcessRunner runner, string schtasksPath, string? tempDir = null)
     {
-        _runner = runner; _schtasks = schtasksPath;
+        _runner = runner; _schtasks = schtasksPath; _tempDir = tempDir ?? Path.GetTempPath();
     }
 
     public static string BuildTaskXml(string exePath, string userId)
@@ -107,9 +109,10 @@ public sealed class StartupTaskService
 
     public async Task<OperationResult> EnableAsync(string exePath, string userId)
     {
-        var xmlPath = Path.Combine(Path.GetTempPath(), $"PowerGuardDisplay-task-{Guid.NewGuid():N}.xml");
+        var xmlPath = Path.Combine(_tempDir, $"PowerGuardDisplay-task-{Guid.NewGuid():N}.xml");
         try
         {
+            Directory.CreateDirectory(_tempDir);
             await File.WriteAllTextAsync(xmlPath, BuildTaskXml(exePath, userId), Encoding.Unicode);
             var r = await _runner.RunAsync(_schtasks, CreateArgs(xmlPath), Timeout);
             if (r.Ok) return new(true, "已创建登录自启动任务");
@@ -134,4 +137,17 @@ public sealed class StartupTaskService
 
     public const string ManualHelp = "手动排查：按 Win+R 输入 taskschd.msc 打开任务计划程序，在“任务计划程序库”中查找 PowerGuardDisplay；" +
         "或在命令提示符运行 schtasks /Query /TN PowerGuardDisplay /V /FO LIST 查看详情。若组策略禁止普通用户创建计划任务，请联系管理员或手动创建。";
+}
+
+/// <summary>控制台上“登录自启动”相关的提醒文案（纯函数，便于测试）。</summary>
+public static class StartupAdvice
+{
+    public static string? Warning(StartupTaskStatus? st)
+    {
+        if (st is null || (st.Error != null && !st.Exists)) return null; // 未知时不打扰
+        if (!st.Exists) return "未开启登录自启动：断电关机后再次开机，程序不会自动运行，也就不会自动恢复外接显示器。可在“设置”中开启。";
+        if (!st.Enabled) return "登录自启动任务已被禁用（任务计划程序中）：重新开机后不会自动运行。可在“设置”中重新保存以修复。";
+        if (st.Command != null && !st.PointsToCurrentExe) return "登录自启动指向其他位置的程序（可能是旧版本）：可在“设置”中重新保存，改为当前程序。";
+        return null;
+    }
 }

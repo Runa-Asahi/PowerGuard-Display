@@ -83,7 +83,14 @@ public static class DisplayModeText
     };
 }
 
-/// <summary>DisplaySwitch.exe 参数映射（第一版唯一的切屏手段）。</summary>
+/// <summary>
+/// 切屏方式。Native = SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_*)（与 Win+P 相同的系统接口）；
+/// DisplaySwitch = 调用 System32\DisplaySwitch.exe；Auto = 先用 v1.0.0 实机验证过的 DisplaySwitch.exe，
+/// 启动失败时用 Native；校验未通过的第二次尝试改用另一种方式。
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<SwitchMethod>))]
+public enum SwitchMethod { Auto, Native, DisplaySwitch }
+
 /// <summary>
 /// DisplaySwitch.exe 参数风格。Windows 10 使用 /internal /clone /extend /external；
 /// 据 Microsoft Q&amp;A 社区反馈，Windows 11 22H2 起内置 DisplaySwitch.exe 改为数字参数 1/2/3/4，

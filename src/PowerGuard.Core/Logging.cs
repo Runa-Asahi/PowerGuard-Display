@@ -57,6 +57,8 @@ public sealed class MemoryLogger : IAppLogger
 /// <summary>
 /// 滚动日志：按天分文件（powerguard-yyyyMMdd.log，JSON Lines），
 /// 单文件超过 MaxFileBytes 时追加序号；保留天数可配置。
+/// 写入使用常驻的 StreamWriter（AutoFlush，进程异常退出也不丢已写入的行），
+/// 跨天时自动切换文件并执行一次保留策略。
 /// </summary>
 public sealed class FileLogger : IAppLogger, IDisposable
 {
@@ -65,6 +67,15 @@ public sealed class FileLogger : IAppLogger, IDisposable
     private readonly List<LogEntry> _recent = new();
     public const int MaxRecent = 3000;
     public long MaxFileBytes { get; init; } = 2 * 1024 * 1024;
+    /// <summary>跨天时自动执行的保留策略（由设置同步）。</summary>
+    public bool RetainLogs { get; set; } = true;
+    public int KeepDays { get; set; } = 14;
+
+    private StreamWriter? _writer;
+    private string? _writerPath;
+    private long _writerBytes;
+    private DateTime _writerDay;
+    private static readonly UTF8Encoding Utf8NoBom = new(false);
     public string Directory { get; }
     public event Action<LogEntry>? EntryAdded;
 
@@ -86,16 +97,45 @@ public sealed class FileLogger : IAppLogger, IDisposable
             if (_recent.Count > MaxRecent) _recent.RemoveRange(0, _recent.Count - MaxRecent);
             try
             {
-                var line = JsonSerializer.Serialize(entry) + Environment.NewLine;
-                File.AppendAllText(CurrentFile(entry.Time), line, Encoding.UTF8);
+                var line = JsonSerializer.Serialize(entry) + "\n";
+                var bytes = Utf8NoBom.GetByteCount(line);
+                EnsureWriter(entry.Time, bytes);
+                _writer!.Write(line);
+                _writerBytes += bytes;
             }
             catch
             {
-                // 日志写失败不能影响保护逻辑；条目仍保留在内存中供 UI 显示。
+                // 日志写失败不能影响保护逻辑；条目仍保留在内存中供 UI 显示。下次重新打开文件。
+                CloseWriter();
             }
         }
         try { EntryAdded?.Invoke(entry); } catch { }
     }
+
+    private void EnsureWriter(DateTimeOffset t, int nextBytes)
+    {
+        var day = t.Date;
+        if (_writer != null && day == _writerDay && _writerBytes + nextBytes <= MaxFileBytes) return;
+        var dayChanged = _writer != null && day != _writerDay;
+        CloseWriter();
+        if (dayChanged)
+        {
+            try { ApplyRetentionCore(RetainLogs, KeepDays); } catch { }
+        }
+        var path = CurrentFile(t);
+        var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+        _writer = new StreamWriter(fs, Utf8NoBom) { AutoFlush = true };
+        _writerPath = path; _writerBytes = fs.Length; _writerDay = day;
+    }
+
+    private void CloseWriter()
+    {
+        try { _writer?.Dispose(); } catch { }
+        _writer = null; _writerPath = null; _writerBytes = 0;
+    }
+
+    /// <summary>当前正在写入的文件（测试 / 诊断用）。</summary>
+    public string? CurrentPath { get { lock (_lock) return _writerPath; } }
 
     private string CurrentFile(DateTimeOffset t)
     {
@@ -123,7 +163,9 @@ public sealed class FileLogger : IAppLogger, IDisposable
         {
             try
             {
-                foreach (var line in File.ReadLines(f))
+                using var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(fs, Encoding.UTF8);
+                while (reader.ReadLine() is { } line)
                 {
                     try { var e = JsonSerializer.Deserialize<LogEntry>(line); if (e != null) loaded.Add(e); } catch { }
                 }
@@ -133,11 +175,21 @@ public sealed class FileLogger : IAppLogger, IDisposable
         lock (_lock)
         {
             _recent.InsertRange(0, loaded.TakeLast(maxEntries));
+            if (_recent.Count > MaxRecent) _recent.RemoveRange(0, _recent.Count - MaxRecent);
         }
     }
 
     /// <summary>清理过期日志。retain=false 时只保留今天的文件。</summary>
     public int ApplyRetention(bool retain, int keepDays = 14)
+    {
+        lock (_lock)
+        {
+            RetainLogs = retain; KeepDays = keepDays;
+            return ApplyRetentionCore(retain, keepDays);
+        }
+    }
+
+    private int ApplyRetentionCore(bool retain, int keepDays)
     {
         var cutoff = retain ? _clock.Now.Date.AddDays(-keepDays) : _clock.Now.Date;
         var removed = 0;
@@ -157,6 +209,7 @@ public sealed class FileLogger : IAppLogger, IDisposable
         lock (_lock)
         {
             _recent.Clear();
+            CloseWriter();
             foreach (var f in System.IO.Directory.GetFiles(Directory, "powerguard-*.log"))
             {
                 try { File.Delete(f); } catch { }
@@ -164,5 +217,5 @@ public sealed class FileLogger : IAppLogger, IDisposable
         }
     }
 
-    public void Dispose() { }
+    public void Dispose() { lock (_lock) CloseWriter(); }
 }
