@@ -29,7 +29,7 @@ public sealed record AppSettings
     /// <summary>DisplaySwitch.exe 参数风格（Auto/Slash/Numeric），仅配置文件可改。</summary>
     public DisplaySwitchArgStyle DisplaySwitchArgStyle { get; set; } = DisplaySwitchArgStyle.Auto;
 
-    /// <summary>切屏方式：Auto = 先用原生 SetDisplayConfig，失败再回退 DisplaySwitch.exe。仅配置文件可改。</summary>
+    /// <summary>切屏方式：Auto = 先用 DisplaySwitch.exe（v1.0.0 实机验证过），失败或校验未通过再用原生 SetDisplayConfig。仅配置文件可改。</summary>
     public SwitchMethod SwitchMethod { get; set; } = SwitchMethod.Auto;
 
     /// <summary>关机 / 重启 / 注销前尽力切回首选显示模式（仅在安全时，见 ShutdownRestorePolicy）。</summary>

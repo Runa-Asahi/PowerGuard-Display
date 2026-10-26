@@ -10,7 +10,8 @@ public sealed class TaskDelay : IDelay { public Task Delay(TimeSpan d, Cancellat
 public interface IDisplayTopologyProvider { DisplayTopology Query(); }
 
 /// <summary>真实实现调用 System32\DisplaySwitch.exe。启动成功 ≠ 切换成功。</summary>
-public interface IDisplaySwitcher { Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct); }
+/// <param name="alternate">true = 使用备用切屏方式（例如首选方式校验未通过后的第二次尝试）。</param>
+public interface IDisplaySwitcher { Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct, bool alternate = false); }
 
 public interface IRecoveryStateStore
 {

@@ -28,7 +28,8 @@ public partial class App : Application
     private DisplayTopologyProvider? _topology;
 
     /// <summary>正常状态下的轮询间隔（主要依赖电源通知与 WM_DISPLAYCHANGE，轮询只是兜底）。</summary>
-    private static readonly TimeSpan IdlePoll = TimeSpan.FromSeconds(10);
+    /// （与 v1.0.0 相同为 3 秒：电源通知丢失时兜底；拓扑查询已有缓存，开销很小）
+    private static readonly TimeSpan IdlePoll = TimeSpan.FromSeconds(3);
     /// <summary>恢复流程中（需要稳定计时 / 超时判定）的轮询间隔。</summary>
     private static readonly TimeSpan ActivePoll = TimeSpan.FromSeconds(2);
     /// <summary>关机前恢复的总时长预算。Windows 约 5 秒后才会显示“程序阻止关机”界面。</summary>
@@ -134,7 +135,7 @@ public partial class App : Application
         await Coordinator.InitializeAsync(power);
 
         // 低频补充轮询：显示拓扑 + 电源状态（通知丢失时的兜底）。
-        // 正常状态 10 秒一次；恢复流程中 2 秒一次。上一轮未结束时跳过，不叠加。
+        // 正常状态 3 秒一次（同 v1.0.0）；恢复流程中 2 秒一次。上一轮未结束时跳过，不叠加。
         _pollPeriod = IdlePoll;
         _timer = new Timer(_ => Poll(), null, TimeSpan.FromSeconds(2), IdlePoll);
 
@@ -203,7 +204,7 @@ public partial class App : Application
             {
                 var status = Coordinator.Status;
                 var want = status is RecoveryStatus.Normal or RecoveryStatus.RecoveryFailed ? IdlePoll : ActivePoll;
-                if (Coordinator.Paused) want = IdlePoll; // 定时暂停的到期检查精度 10 秒足够
+                if (Coordinator.Paused) want = IdlePoll; // 暂停期间不需要更快
                 if (want != _pollPeriod && !_exiting)
                 {
                     _pollPeriod = want;

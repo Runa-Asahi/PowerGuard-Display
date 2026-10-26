@@ -10,8 +10,12 @@ public class ShutdownRestoreTests
         : DisplayTopology.Failed("x");
 
     private static ShutdownDecision D(AppSettings? s = null, RecoveryStatus st = RecoveryStatus.Normal, bool paused = false,
-        PowerSource p = PowerSource.Ac, RecoveryState? marker = null, DisplayTopology? t = null) =>
-        ShutdownRestorePolicy.Decide(s ?? new AppSettings(), st, paused, p, marker, t ?? Topo(DisplayMode.Internal));
+        PowerSource p = PowerSource.Ac, RecoveryState? marker = null, DisplayTopology? t = null, bool stable = true) =>
+        ShutdownRestorePolicy.Decide(s ?? new AppSettings(), st, paused, p, marker, t ?? Topo(DisplayMode.Internal), stable);
+
+    [Fact]
+    public void Skips_WhileWaiting_IfExternalNotYetStable()
+        => Assert.False(D(st: RecoveryStatus.WaitingForExternal, marker: new RecoveryState { PreferredModeSnapshot = DisplayMode.External }, stable: false).Apply);
 
     [Fact]
     public void Applies_WhenOnAc_ExternalAvailable_AndNotInPreferred()
@@ -125,24 +129,24 @@ public class ShutdownRestoreTests
     }
 
     [Fact]
-    public async Task Coordinator_DoesNotTouchMarker_AndNextBootClearsItWithoutSwitching()
+    public async Task Coordinator_ShutdownRightAfterPowerReturns_SkipsUntilExternalStable_MarkerKept()
     {
         var h = new Harness();
         await h.C.InitializeAsync(PowerSource.Ac);
         await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
-        await h.C.OnPowerSourceChangedAsync(PowerSource.Ac); // 来电，等待稳定期间用户关机
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Ac); // 刚来电，显示器可能还没真正亮
         var r = await h.C.PrepareForShutdownAsync(TimeSpan.FromSeconds(4));
-        Assert.True(r.Success);
-        Assert.NotNull(h.Store.State); // 标记保留，关机失败时下次仍可继续
+        Assert.False(r.Attempted);
+        Assert.Contains("尚未稳定", r.Message);
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+        Assert.NotNull(h.Store.State); // 下次开机继续恢复流程
 
-        // 下次开机：已是首选模式 → 稳定后直接确认并清除标记，不再切屏
-        h.Display.Launches.Clear();
         h.Create();
         await h.C.InitializeAsync(PowerSource.Ac);
         await h.RunFor(30);
         Assert.Equal(RecoveryStatus.Normal, h.C.Status);
+        Assert.Equal(DisplayMode.External, h.Display.Mode);
         Assert.Null(h.Store.State);
-        Assert.Empty(h.Display.Launches);
     }
 
     [Fact]

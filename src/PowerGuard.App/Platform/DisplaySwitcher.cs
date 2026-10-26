@@ -5,9 +5,13 @@ using static PowerGuard.App.Native.NativeMethods;
 namespace PowerGuard.App.Platform;
 
 /// <summary>
-/// 切换显示拓扑。默认使用原生 SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_*)——Win+P 背后的同一接口，
-/// 不依赖 DisplaySwitch.exe 的参数格式、不启动进程、能拿到明确的返回码；失败时（Auto）回退 DisplaySwitch.exe。
-/// 不论哪种方式，切换结果都由调用方重新查询拓扑校验。
+/// 切换显示拓扑。两种方式：
+/// - DisplaySwitch.exe（Win+P 同款工具）：v1.0.0 起在实机（Lenovo Y7000）上验证过断电切内屏有效，
+///   Windows 会把结果记入显示配置数据库，之后显示器热插拔时沿用该配置。
+/// - 原生 SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_*)：按数据库中“该拓扑上一次的配置”切换。
+///   注意：官方文档规定 SDC_SAVE_TO_DATABASE 只能与 SDC_USE_SUPPLIED_DISPLAY_CONFIG 一起使用，不能与 SDC_TOPOLOGY_* 组合。
+/// SwitchMethod.Auto：先用实机验证过的 DisplaySwitch.exe，启动失败时用原生接口；alternate=true 时两者顺序互换
+/// （协调器在第一次校验未通过时用备用方式再试一次）。不论哪种方式，结果都由调用方重新查询拓扑校验。
 /// </summary>
 public sealed class DisplaySwitcher : IDisplaySwitcher
 {
@@ -30,19 +34,27 @@ public sealed class DisplaySwitcher : IDisplaySwitcher
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "未知模式不能切换"),
     };
 
-    public async Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct)
+    public async Task<SwitchLaunchResult> SwitchAsync(DisplayMode mode, CancellationToken ct, bool alternate = false)
     {
         if (!await _busy.WaitAsync(0, ct).ConfigureAwait(false))
             return SwitchLaunchResult.Fail("已有切屏命令正在执行（防重入）");
         try
         {
             var method = _settings().SwitchMethod;
-            if (method is SwitchMethod.Auto or SwitchMethod.Native)
+            if (method == SwitchMethod.Native) return SwitchNative(mode);
+            if (method == SwitchMethod.DisplaySwitch) return await SwitchWithDisplaySwitchAsync(mode, ct).ConfigureAwait(false);
+
+            // Auto
+            if (!alternate)
             {
-                var native = SwitchNative(mode);
-                if (native.Started || method == SwitchMethod.Native) return native;
-                _log.Log(LogCategory.Switch, $"{native.Error}，回退到 DisplaySwitch.exe", LogResult.Warning);
+                var r = await SwitchWithDisplaySwitchAsync(mode, ct).ConfigureAwait(false);
+                if (r.Started) return r;
+                _log.Log(LogCategory.Switch, $"{r.Error}，改用 SetDisplayConfig", LogResult.Warning);
+                return SwitchNative(mode);
             }
+            var n = SwitchNative(mode);
+            if (n.Started) return n;
+            _log.Log(LogCategory.Switch, $"{n.Error}，改用 DisplaySwitch.exe", LogResult.Warning);
             return await SwitchWithDisplaySwitchAsync(mode, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }

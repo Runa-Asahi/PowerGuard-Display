@@ -14,7 +14,7 @@ public sealed record ShutdownDecision(bool Apply, DisplayMode Target, string Rea
 public static class ShutdownRestorePolicy
 {
     public static ShutdownDecision Decide(AppSettings settings, RecoveryStatus status, bool paused,
-        PowerSource power, RecoveryState? marker, DisplayTopology topology)
+        PowerSource power, RecoveryState? marker, DisplayTopology topology, bool externalStable = true)
     {
         var target = marker?.PreferredModeSnapshot is { } m && m != DisplayMode.Unknown ? m : settings.PreferredMode;
 
@@ -31,6 +31,9 @@ public static class ShutdownRestorePolicy
             return ShutdownDecision.Skip(target, $"正在执行“{DisplayModeText.Of(status)}”，不打断");
         if (DisplaySwitchArgs.RequiresExternal(target) && topology.ExternalAvailableCount == 0)
             return ShutdownDecision.Skip(target, "Windows 未检测到外接显示路径，切换会导致黑屏，跳过");
+
+        if (DisplaySwitchArgs.RequiresExternal(target) && status == RecoveryStatus.WaitingForExternal && !externalStable)
+            return ShutdownDecision.Skip(target, "来电后外接显示器尚未稳定可用，保持当前模式");
 
         return new(true, target, $"关机前切换为{DisplayModeText.Of(target)}（当前 {DisplayModeText.Of(topology.Mode)}，外接可用 {topology.ExternalAvailableCount}）");
     }

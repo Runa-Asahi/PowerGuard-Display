@@ -49,6 +49,13 @@ public sealed class RecoveryCoordinator
     private CancellationTokenSource? _flowCts;
     private bool _autoRestoreDisabledLogged;
     private DateTimeOffset? _pausedUntil;
+    private DateTimeOffset? _lastGuardAt;
+    private int _guardAttempts;
+
+    /// <summary>断电期间内屏守护：两次重新切回内屏之间的最短间隔，连续失败后的退避间隔。</summary>
+    public static readonly TimeSpan GuardInterval = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan GuardBackoff = TimeSpan.FromSeconds(60);
+    public const int GuardFastAttempts = 6;
 
     public event EventHandler? StateChanged;
 
@@ -191,9 +198,14 @@ public sealed class RecoveryCoordinator
             if (p == _power) return; // 去重：注册时 Windows 会立即发送一次当前值
             prev = _power; _power = p; seq = ++_powerSeq;
         }
-        await _gate.WaitAsync();
-        try { Event(LogCategory.Power, $"电源来源变化：{DisplayModeText.Of(prev)} → {DisplayModeText.Of(p)}", LogResult.Info); }
-        finally { ReleaseGate(); }
+        // 与 v1.0.0 一致：电源变化立即记录，不排队等锁（否则恢复流程持锁时会推迟断电确认）。
+        var powerText = $"电源来源变化：{DisplayModeText.Of(prev)} → {DisplayModeText.Of(p)}";
+        if (_gate.Wait(0))
+        {
+            try { Event(LogCategory.Power, powerText, LogResult.Info); }
+            finally { ReleaseGate(); }
+        }
+        else _log.Log(LogCategory.Power, powerText);
 
         if (p == PowerSource.Battery && prev == PowerSource.Ac)
         {
@@ -251,17 +263,23 @@ public sealed class RecoveryCoordinator
         SaveMarker();
         Event(LogCategory.Recovery, $"检测到市电转电池，已保存恢复标记（首选 {DisplayModeText.Of(_marker.PreferredModeSnapshot)}，断电前 {DisplayModeText.Of(topo.Mode)}）", LogResult.Warning);
         SetStatus(RecoveryStatus.SwitchingToInternal);
-        await SwitchToInternalCoreAsync(CancellationToken.None);
+        // 断电时总是下发切内屏命令，即使此刻读到的已是“仅电脑屏幕”：
+        // 断电瞬间外接显示器会短暂消失，Windows 自己回落到内屏；随后显示器（仍保留 EDID）被重新识别时，
+        // Windows 会按数据库中“内屏+外接”这组显示器上次的配置（仅第二屏幕）切回去。
+        // 显式切一次内屏，并在断电期间持续守护（见 TickAsync），才能让内屏保持点亮。
+        await SwitchToInternalCoreAsync(CancellationToken.None, force: true);
+        _lastGuardAt = _clock.Now; _guardAttempts = 0;
         _waitingOnAcSince = Power == PowerSource.Ac ? _clock.Now : null;
         _externalStableSince = null;
         SetStatus(RecoveryStatus.WaitingForExternal);
     }
 
-    /// <summary>切到仅内屏并校验，最多 2 次尝试。</summary>
-    private async Task<OperationResult> SwitchToInternalCoreAsync(CancellationToken ct)
+    /// <summary>切到仅内屏并校验，最多 2 次尝试（第 2 次用备用切屏方式）。</summary>
+    /// <param name="force">true = 即使当前已是仅电脑屏幕也下发命令（断电保护 / 断电期间守护）。</param>
+    private async Task<OperationResult> SwitchToInternalCoreAsync(CancellationToken ct, bool force = false)
     {
         var before = QueryTopology();
-        if (before.QuerySucceeded && before.Mode == DisplayMode.Internal)
+        if (!force && before.QuerySucceeded && before.Mode == DisplayMode.Internal)
         {
             Event(LogCategory.Switch, "当前已是仅电脑屏幕，无需切换", LogResult.Success);
             return new(true, "当前已是仅电脑屏幕");
@@ -269,15 +287,15 @@ public sealed class RecoveryCoordinator
         string err = "";
         for (var attempt = 1; attempt <= 2; attempt++)
         {
-            var launch = await _switcher.SwitchAsync(DisplayMode.Internal, ct);
+            var launch = await _switcher.SwitchAsync(DisplayMode.Internal, ct, alternate: attempt > 1);
             if (!launch.Started)
             {
-                err = $"DisplaySwitch.exe 启动失败：{launch.Error}";
+                err = $"切屏命令执行失败：{launch.Error}";
                 _log.Log(LogCategory.Switch, $"切换到内屏（第 {attempt} 次）：{err}", LogResult.Failure);
             }
             else
             {
-                _log.Log(LogCategory.Switch, $"已调用 DisplaySwitch.exe 切换到仅电脑屏幕（第 {attempt} 次，退出码 {launch.ExitCode?.ToString() ?? "未知"}），等待校验");
+                _log.Log(LogCategory.Switch, $"已下发切换到仅电脑屏幕的命令（第 {attempt} 次{(attempt > 1 ? "，备用方式" : "")}，退出码 {launch.ExitCode?.ToString() ?? "未知"}），等待校验");
                 await _delay.Delay(TimeSpan.FromSeconds(_settings().VerifyDelaySeconds), ct);
                 var t = QueryTopology();
                 if (t.QuerySucceeded && t.InternalActive)
@@ -305,8 +323,19 @@ public sealed class RecoveryCoordinator
         {
             var topo = QueryTopology();
             if (_paused && _pausedUntil is { } until && _clock.Now >= until) ResumeCore("暂停时间已到，自动恢复保护");
+            if (!_paused && _marker is not null && _flowStatus == RecoveryStatus.RecoveryFailed && Power != PowerSource.Ac)
+            {
+                await GuardInternalOnBatteryAsync(topo); // 恢复失败后又断电：同样守护内屏
+                return;
+            }
             if (_paused || _flowStatus != RecoveryStatus.WaitingForExternal || _marker is null) return;
-            if (Power != PowerSource.Ac) return; // 断电期间维持内屏，不因显示器波动切屏
+            if (Power != PowerSource.Ac)
+            {
+                // 断电期间：绝不自动恢复外接；若 Windows 自己把显示切回了外接（显示器仍被识别），重新切回内屏
+                await GuardInternalOnBatteryAsync(topo);
+                return;
+            }
+            _guardAttempts = 0;
 
             var s = _settings();
             if (!s.AutoRestoreOnPowerReturn)
@@ -350,6 +379,24 @@ public sealed class RecoveryCoordinator
         }
         catch (Exception ex) { _log.Log(LogCategory.Error, $"定时检查异常：{ex.Message}", LogResult.Failure); }
         finally { ReleaseGate(); }
+    }
+
+    /// <summary>
+    /// 断电期间的内屏守护：只要不是市电、存在恢复标记且内屏不在活动状态（或拓扑读不出来），就重新切回内屏。
+    /// 限速：前 GuardFastAttempts 次至少间隔 GuardInterval，之后每 GuardBackoff 一次，避免与驱动来回拉扯。
+    /// 内屏恢复活动后计数清零。
+    /// </summary>
+    private async Task GuardInternalOnBatteryAsync(DisplayTopology topo)
+    {
+        if (topo.QuerySucceeded && topo.InternalActive) { _guardAttempts = 0; return; }
+        var now = _clock.Now;
+        var interval = _guardAttempts >= GuardFastAttempts ? GuardBackoff : GuardInterval;
+        if (_lastGuardAt is { } last && now - last < interval) return;
+        _lastGuardAt = now; _guardAttempts++;
+        Event(LogCategory.Recovery, topo.QuerySucceeded
+            ? $"内屏守护：断电期间显示被切回{DisplayModeText.Of(topo.Mode)}（多为 Windows 重新识别到仍保留信号的外接显示器），重新切回内屏（第 {_guardAttempts} 次）"
+            : $"内屏守护：断电期间无法读取显示拓扑（{topo.Error}），保守地重新切回内屏（第 {_guardAttempts} 次）", LogResult.Warning);
+        await SwitchToInternalCoreAsync(CancellationToken.None, force: true);
     }
 
     private async Task<OperationResult> RestoreCoreAsync(DisplayMode preferred, bool automatic)
@@ -538,6 +585,11 @@ public sealed class RecoveryCoordinator
         try { QueryTopology(); } finally { ReleaseGate(); }
     }
 
+    /// <summary>等待外接期间：外接路径是否已连续可用至少稳定时间（否则关机前不切外接，避免显示器其实没电）。</summary>
+    private bool ExternalStableEnough() =>
+        _flowStatus != RecoveryStatus.WaitingForExternal ||
+        (_externalStableSince is { } since && _clock.Now - since >= TimeSpan.FromSeconds(_settings().StabilitySeconds));
+
     // ───────────────────────── 关机前恢复 ─────────────────────────
 
     /// <summary>
@@ -561,7 +613,7 @@ public sealed class RecoveryCoordinator
         {
             var topo = QueryTopology();
             var decision = ShutdownRestorePolicy.Decide(_settings(), Status == RecoveryStatus.Paused || _paused ? RecoveryStatus.Paused : _flowStatus,
-                _paused, Power, _marker, topo);
+                _paused, Power, _marker, topo, ExternalStableEnough());
             if (!decision.Apply)
             {
                 _log.Log(LogCategory.Switch, $"关机前恢复：跳过（{decision.Reason}）", LogResult.Info);
