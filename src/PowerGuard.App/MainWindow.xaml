@@ -38,7 +38,7 @@
                             <DockPanel>
                                 <Ellipse x:Name="BannerDot" Width="14" Height="14" Margin="0,4,14,0" VerticalAlignment="Top" Fill="{StaticResource Ok}"/>
                                 <StackPanel>
-                                    <TextBlock x:Name="BannerTitle" FontSize="18" FontWeight="SemiBold" Text="正在初始化…"/>
+                                    <TextBlock x:Name="BannerTitle" AutomationProperties.LiveSetting="Polite" FontSize="18" FontWeight="SemiBold" Text="正在初始化…"/>
                                     <TextBlock x:Name="BannerDetail" Style="{StaticResource Hint}"/>
                                     <TextBlock x:Name="StartupWarning" Style="{StaticResource Hint}" Foreground="{StaticResource Warn}" Margin="0,6,0,0" Visibility="Collapsed" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
                                 </StackPanel>
@@ -112,7 +112,7 @@
                                 <Grid Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <TextBlock Text="首选显示模式" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="SPreferred" Grid.Column="1" Width="240" HorizontalAlignment="Left">
+                                    <ComboBox x:Name="SPreferred" AutomationProperties.Name="首选显示模式" Grid.Column="1" Width="240" HorizontalAlignment="Left">
                                         <ComboBoxItem Tag="Internal" Content="仅笔记本屏幕（internal）"/>
                                         <ComboBoxItem Tag="External" Content="仅外接显示器（external）"/>
                                         <ComboBoxItem Tag="Extend" Content="扩展（extend）"/>
@@ -129,16 +129,16 @@
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
                                     <TextBlock Text="显示器稳定等待时间" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="SStability" Grid.Column="1" Margin="0,4"/>
+                                    <TextBox x:Name="SStability" AutomationProperties.Name="显示器稳定等待时间（秒）" Grid.Column="1" Margin="0,4"/>
                                     <TextBlock Grid.Column="2" Text="秒（3–600）" Style="{StaticResource Hint}" Margin="8,0" VerticalAlignment="Center"/>
                                     <TextBlock Grid.Row="1" Text="恢复超时时间" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="STimeout" Grid.Row="1" Grid.Column="1" Margin="0,4"/>
+                                    <TextBox x:Name="STimeout" AutomationProperties.Name="恢复超时时间（分钟）" Grid.Row="1" Grid.Column="1" Margin="0,4"/>
                                     <TextBlock Grid.Row="1" Grid.Column="2" Text="分钟（1–1440，从市电恢复起计）" Style="{StaticResource Hint}" Margin="8,0" VerticalAlignment="Center"/>
                                     <TextBlock Grid.Row="2" Text="失败重试间隔" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="SRetryInterval" Grid.Row="2" Grid.Column="1" Margin="0,4"/>
+                                    <TextBox x:Name="SRetryInterval" AutomationProperties.Name="失败重试间隔（秒）" Grid.Row="2" Grid.Column="1" Margin="0,4"/>
                                     <TextBlock Grid.Row="2" Grid.Column="2" Text="秒（5–3600）" Style="{StaticResource Hint}" Margin="8,0" VerticalAlignment="Center"/>
                                     <TextBlock Grid.Row="3" Text="最大重试次数" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="SMaxRetries" Grid.Row="3" Grid.Column="1" Margin="0,4"/>
+                                    <TextBox x:Name="SMaxRetries" AutomationProperties.Name="最大重试次数" Grid.Row="3" Grid.Column="1" Margin="0,4"/>
                                     <TextBlock Grid.Row="3" Grid.Column="2" Text="次（0–10，不含首次尝试）" Style="{StaticResource Hint}" Margin="8,0" VerticalAlignment="Center"/>
                                 </Grid>
                             </StackPanel>
@@ -163,9 +163,9 @@
                 <DockPanel x:Name="LogsPage" Visibility="Collapsed">
                     <TextBlock DockPanel.Dock="Top" Text="运行日志" Style="{StaticResource Title}"/>
                     <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,4">
-                        <ComboBox x:Name="LogCategoryFilter" Width="130" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
-                        <ComboBox x:Name="LogResultFilter" Width="110" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
-                        <TextBox x:Name="LogSearch" Width="200" Margin="0,0,8,8" TextChanged="LogSearch_Changed" ToolTip="按内容筛选"/>
+                        <ComboBox x:Name="LogCategoryFilter" AutomationProperties.Name="按日志类别筛选" Width="130" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
+                        <ComboBox x:Name="LogResultFilter" AutomationProperties.Name="按结果筛选" Width="110" Margin="0,0,8,8" SelectionChanged="LogFilter_Changed"/>
+                        <TextBox x:Name="LogSearch" AutomationProperties.Name="搜索日志内容" Width="200" Margin="0,0,8,8" TextChanged="LogSearch_Changed" ToolTip="按内容筛选"/>
                         <Button Content="复制所选" Click="CopySelectedLogs_Click"/>
                         <Button Content="复制全部（筛选后）" Click="CopyAllLogs_Click"/>
                         <Button Content="打开日志目录" Click="OpenLogDir_Click"/>

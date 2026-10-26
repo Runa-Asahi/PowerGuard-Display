@@ -42,7 +42,7 @@ public sealed class TrayIcon : IDisposable
         _pause = new Forms.ToolStripMenuItem("暂停自动保护", null, async (_, _) => await TogglePause());
         _pause1h = new Forms.ToolStripMenuItem("暂停 1 小时", null, async (_, _) => await _app.Coordinator.SetPausedAsync(true, TimeSpan.FromHours(1)));
         _internal = new Forms.ToolStripMenuItem("切回笔记本内屏", null, async (_, _) => await RunBusy(() => Actions.SwitchInternal(null)));
-        _restore = new Forms.ToolStripMenuItem("尝试恢复外接显示器", null, async (_, _) => await RunBusy(() => Actions.RestorePreferred(null)));
+        _restore = new Forms.ToolStripMenuItem("尝试恢复首选显示模式", null, async (_, _) => await RunBusy(() => Actions.RestorePreferred(null)));
         menu.Items.Add(new Forms.ToolStripMenuItem("显示主窗口", null, (_, _) => _app.ShowMainWindow()) { Font = new Font(Forms.Control.DefaultFont, System.Drawing.FontStyle.Bold) });
         menu.Items.Add(_status);
         menu.Items.Add(new Forms.ToolStripMenuItem("查看保护状态", null, (_, _) => _app.ShowPage(0)));
@@ -82,7 +82,7 @@ public sealed class TrayIcon : IDisposable
     {
         var snap = _app.Coordinator.Snapshot();
         var s = snap.Status;
-        _status.Text = $"状态：{DisplayModeText.Of(s)} · {DisplayModeText.Of(snap.Power)}";
+        _status.Text = $"状态：{StatusText.Headline(snap)} · {DisplayModeText.Of(snap.Power)}";
         _pause.Text = snap.Paused ? "恢复自动保护" : "暂停自动保护";
         _pause1h.Visible = !snap.Paused;
         _internal.Enabled = _restore.Enabled = !_busy;
