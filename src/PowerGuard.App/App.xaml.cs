@@ -132,7 +132,7 @@ public partial class App : Application
         {
             Log.Log(LogCategory.Power, "系统从睡眠恢复，重新读取电源状态与显示拓扑");
             _topology?.InvalidateCache();
-            Fire(async () => { await Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus(Log)); await Coordinator.TickAsync(); });
+            Fire(async () => { await Coordinator.OnResumedFromSleepAsync(); await Coordinator.OnPowerSourceChangedAsync(SystemMonitor.ReadPowerStatus(Log)); await Coordinator.TickAsync(); });
         };
         Monitor.QueryEndSessionHandler = OnQueryEndSession;
         try { Monitor.Start(); MonitorRunning = true; }

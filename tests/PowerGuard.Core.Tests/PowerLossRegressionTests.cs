@@ -317,3 +317,64 @@ public class DdcManualTests
         Assert.Equal(DisplayMode.External, h.Display.Mode);
     }
 }
+
+public class StartupAdviceTests
+{
+    [Fact] public void Unknown_NoWarning() { Assert.Null(StartupAdvice.Warning(null)); Assert.Null(StartupAdvice.Warning(new(false, false, null, false, "err"))); }
+    [Fact] public void Missing_Warns() => Assert.Contains("未开启登录自启动", StartupAdvice.Warning(new(false, false, null, false, null)));
+    [Fact] public void Disabled_Warns() => Assert.Contains("已被禁用", StartupAdvice.Warning(new(true, false, "x", true, null)));
+    [Fact] public void OtherExe_Warns() => Assert.Contains("其他位置", StartupAdvice.Warning(new(true, true, "x", false, null)));
+    [Fact] public void Ok_NoWarning() => Assert.Null(StartupAdvice.Warning(new(true, true, "x", true, null)));
+}
+
+public class DdcAlreadyPreferredTests
+{
+    [Fact]
+    public async Task Ddc_WindowsAlreadyOnDeadExternal_RevertsToInternal()
+    {
+        var h = new Harness();
+        h.Settings = h.Settings with { VerifyRestoreWithDdc = true };
+        var p = new FakeProbe();
+        var c = new RecoveryCoordinator(() => h.Settings, h.Store, h.Display, h.Display, h.Clock, new FakeDelay(h.Clock), h.Log, p);
+        await c.InitializeAsync(PowerSource.Ac);
+        for (var i = 0; i < 3; i++) { h.Clock.Advance(TimeSpan.FromSeconds(2)); await c.TickAsync(); }
+        await c.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await c.OnPowerSourceChangedAsync(PowerSource.Ac);
+        h.Display.Mode = DisplayMode.External; // Windows 自己切回了外接
+        p.Default = MonitorResponse.NotResponding;
+        for (var i = 0; i < 10; i++) { h.Clock.Advance(TimeSpan.FromSeconds(2)); await c.TickAsync(); }
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+        Assert.Equal(RecoveryStatus.WaitingForExternal, c.Status);
+    }
+}
+
+public class ResumeTests
+{
+    [Fact]
+    public async Task Resume_ClearsStaleLidClosed_GuardWorksAgain()
+    {
+        var h = new Harness();
+        await h.C.InitializeAsync(PowerSource.Ac);
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await h.C.OnLidChangedAsync(false);
+        await h.C.OnResumedFromSleepAsync();
+        h.Display.Mode = DisplayMode.External;
+        await h.RunFor(10);
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+    }
+}
+
+public class DdcLearnCapTests
+{
+    [Fact]
+    public async Task Ddc_Learning_StopsAfterFiveFailures()
+    {
+        var h = new Harness();
+        h.Settings = h.Settings with { VerifyRestoreWithDdc = true };
+        var p = new FakeProbe { Default = MonitorResponse.NotResponding };
+        var c = new RecoveryCoordinator(() => h.Settings, h.Store, h.Display, h.Display, h.Clock, new FakeDelay(h.Clock), h.Log, p);
+        await c.InitializeAsync(PowerSource.Ac);
+        for (var i = 0; i < 400; i++) { h.Clock.Advance(TimeSpan.FromSeconds(3)); await c.TickAsync(); }
+        Assert.Equal(5, p.Calls);
+    }
+}

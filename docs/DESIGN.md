@@ -155,3 +155,6 @@ Windows 10 的 `DisplaySwitch.exe` 接受 `/internal /external /extend /clone`�
 - **盖子**：SystemMonitor.LidChanged → OnLidChangedAsync。合盖时守护只记录一次日志、不重试；断电中开盖立即重置限速并守护一次。
 - **DDC/CI 校验**（VerifyRestoreWithDdc，默认关闭）：IMonitorProbe（App 端 DdcMonitorProbe，dxva2 读 VCP 0xD6）。只有在 Normal + 市电 + 外接活动时读到过应答（每 60 秒最多一次）才认为支持。仅自动恢复、且首选模式需要外接时校验；3 次都明确 NotResponding 才回退，Unsupported 视为正常；回退后本流程不再使用 DDC，避免来回切换。
 - **崩溃看门狗**（RelaunchAfterCrash）：CrashRelaunchPolicy 每小时最多 3 次，历史记录在 crash-relaunch.txt；新进程以 --after-crash 启动并等待互斥体。
+
+- **停电期间开机**：InitializeAsync 在 电池 + 无标记 + 内屏存在但未活动 + AutoSwitchOnPowerLoss 时调用 PowerLossFlowCoreAsync（会写入恢复标记，来电后正常恢复）。内屏已点亮时仍保持 v1.0.0 行为：不推断断电。
+- **睡眠恢复**：OnResumedFromSleepAsync 把盖子状态置为未知并清除守护限速。

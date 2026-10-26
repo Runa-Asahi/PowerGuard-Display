@@ -60,6 +60,8 @@ public sealed class RecoveryCoordinator
     private bool _ddcSupported;
     private bool _ddcUsedThisFlow;
     private DateTimeOffset? _lastDdcLearnAt;
+    private int _ddcLearnFailures;
+    private const int DdcLearnMaxFailures = 5;
 
     /// <summary>断电期间内屏守护：两次重新切回内屏之间的最短间隔，连续失败后的退避间隔。</summary>
     public static readonly TimeSpan GuardInterval = TimeSpan.FromSeconds(5);
@@ -182,9 +184,18 @@ public sealed class RecoveryCoordinator
             }
             else _marker = r.Value is { Pending: true } ? r.Value : null;
 
+            if (_marker is null && initialPower == PowerSource.Battery && _settings().AutoSwitchOnPowerLoss &&
+                topo.QuerySucceeded && topo.InternalPresent && !topo.InternalActive)
+            {
+                // 断电期间开机（例如整夜停电）：Windows 按记忆的拓扑只点亮外接显示器，而显示器其实没电 → 黑屏。
+                // 电池供电且内屏未点亮时，直接进入断电保护流程（与运行中断电完全相同）。
+                Event(LogCategory.Recovery, $"启动时为电池供电且内屏未点亮（{topo}），按断电处理", LogResult.Warning);
+                await PowerLossFlowCoreAsync();
+                return;
+            }
             if (_marker is null)
             {
-                // 没有标记：即使当前是电池也不切屏，不推断曾经断电。
+                // 没有标记且内屏可用：即使当前是电池也不切屏，不推断曾经断电。
                 _flowStatus = RecoveryStatus.Normal;
                 Event(LogCategory.App, initialPower == PowerSource.Battery ? "启动时为电池供电，但无恢复标记，不执行切屏" : "启动完成，无未完成的恢复流程", LogResult.Info);
                 return;
@@ -422,10 +433,20 @@ public sealed class RecoveryCoordinator
         finally { ReleaseGate(); }
     }
 
+    /// <summary>
+    /// 从睡眠/休眠恢复：盖子状态视为未知（恢复期间的开盖通知可能丢失），避免“盖子已合上”的旧状态让守护一直不工作。
+    /// </summary>
+    public async Task OnResumedFromSleepAsync()
+    {
+        await _gate.WaitAsync();
+        try { _lidOpen = null; _lidClosedLogged = false; _lastGuardAt = null; Changed(); }
+        finally { ReleaseGate(); }
+    }
+
     /// <summary>正常使用外接显示器时，每 60 秒尝试一次 DDC/CI，确认它是否支持（只在开启实验功能时）。</summary>
     private void LearnDdcSupport(DisplayTopology topo)
     {
-        if (_probe is null || _ddcSupported || !_settings().VerifyRestoreWithDdc) return;
+        if (_probe is null || _ddcSupported || _ddcLearnFailures >= DdcLearnMaxFailures || !_settings().VerifyRestoreWithDdc) return;
         if (_flowStatus != RecoveryStatus.Normal || Power != PowerSource.Ac || !topo.QuerySucceeded || topo.ExternalActiveCount == 0) return;
         var now = _clock.Now;
         if (_lastDdcLearnAt is { } last && now - last < TimeSpan.FromSeconds(60)) return;
@@ -438,6 +459,8 @@ public sealed class RecoveryCoordinator
             _log.Log(LogCategory.Display, "外接显示器支持 DDC/CI，恢复后将用它确认显示器真的在应答", LogResult.Success);
             Changed();
         }
+        else if (++_ddcLearnFailures == DdcLearnMaxFailures)
+            _log.Log(LogCategory.Display, "外接显示器连续 5 次未应答 DDC/CI（可能不支持或在显示器菜单中关闭了 DDC/CI），本次运行不再使用 DDC/CI 校验", LogResult.Warning);
     }
 
     /// <summary>
@@ -493,6 +516,16 @@ public sealed class RecoveryCoordinator
         Event(LogCategory.Recovery, $"{(automatic ? "自动" : "手动")}恢复首选模式：{DisplayModeText.Of(preferred)}（最多 {attempts} 次）", LogResult.Info);
         string err = "";
         var current = QueryTopology();
+        if (current.QuerySucceeded && current.Mode == preferred && automatic && !await ExternalReallyRespondingAsync(preferred, ct))
+        {
+            // Windows 自己已切到外接（显示器仍保留 EDID），但显示器没有应答
+            _ddcUsedThisFlow = true;
+            RaiseAlert("外接显示器没有应答", "Windows 已显示在外接显示器上，但显示器通过 DDC/CI 没有应答（可能其实没电），已切回内屏并继续等待。");
+            await SwitchToInternalCoreAsync(CancellationToken.None, force: true);
+            _externalStableSince = null;
+            SetStatus(RecoveryStatus.WaitingForExternal);
+            return new(false, "外接显示器没有应答，已切回内屏");
+        }
         if (current.QuerySucceeded && current.Mode == preferred)
         {
             // 例如关机前已切回首选模式：无需再切，直接确认并清除标记

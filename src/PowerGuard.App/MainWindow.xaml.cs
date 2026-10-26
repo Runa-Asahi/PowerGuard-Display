@@ -128,6 +128,10 @@ public partial class MainWindow : Window
         var ss = _app.StartupStatus;
         StartupText.Text = ss is null ? "检查中…" : ss.Error != null && !ss.Exists ? "检查失败" : !ss.Exists ? (st.StartWithWindows ? "未创建（异常）" : "未开启") : !ss.Enabled ? "任务已禁用" : ss.PointsToCurrentExe ? "已开启" : "已开启（指向其他位置）";
 
+        var sw = StartupAdvice.Warning(ss);
+        StartupWarning.Text = sw ?? "";
+        StartupWarning.Visibility = sw is null ? Visibility.Collapsed : Visibility.Visible;
+
         // 横幅
         string title, detail; Brush dot;
         switch (snap.Status)

@@ -138,3 +138,16 @@ public sealed class StartupTaskService
     public const string ManualHelp = "手动排查：按 Win+R 输入 taskschd.msc 打开任务计划程序，在“任务计划程序库”中查找 PowerGuardDisplay；" +
         "或在命令提示符运行 schtasks /Query /TN PowerGuardDisplay /V /FO LIST 查看详情。若组策略禁止普通用户创建计划任务，请联系管理员或手动创建。";
 }
+
+/// <summary>控制台上“登录自启动”相关的提醒文案（纯函数，便于测试）。</summary>
+public static class StartupAdvice
+{
+    public static string? Warning(StartupTaskStatus? st)
+    {
+        if (st is null || (st.Error != null && !st.Exists)) return null; // 未知时不打扰
+        if (!st.Exists) return "未开启登录自启动：断电关机后再次开机，程序不会自动运行，也就不会自动恢复外接显示器。可在“设置”中开启。";
+        if (!st.Enabled) return "登录自启动任务已被禁用（任务计划程序中）：重新开机后不会自动运行。可在“设置”中重新保存以修复。";
+        if (st.Command != null && !st.PointsToCurrentExe) return "登录自启动指向其他位置的程序（可能是旧版本）：可在“设置”中重新保存，改为当前程序。";
+        return null;
+    }
+}
