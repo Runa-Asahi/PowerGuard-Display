@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches-ignore: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -40,9 +41,19 @@ jobs:
           name: test-results
           path: TestResults
 
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        run: |
+          # 打 tag（v1.2.0）时版本取自 tag，否则取 csproj 的 <Version>
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart('v') }
+          else { $v = ([xml](Get-Content src/PowerGuard.App/PowerGuard.App.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1 }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $v"
+
       - name: Publish (self-contained + framework-dependent)
         shell: pwsh
-        run: ./publish.ps1 -SkipTests -Zip
+        run: ./publish.ps1 -SkipTests -Zip -Version ${{ steps.ver.outputs.version }}
 
       - name: Smoke check published exe
         shell: pwsh
@@ -51,7 +62,8 @@ jobs:
             $exe = Join-Path $d 'PowerGuardDisplay.exe'
             if (-not (Test-Path $exe)) { throw "missing $exe" }
             $v = (Get-Item $exe).VersionInfo
-            Write-Host "$exe  $([math]::Round((Get-Item $exe).Length/1MB,1)) MB  FileVersion=$($v.FileVersion)"
+            Write-Host "$exe  $([math]::Round((Get-Item $exe).Length/1MB,1)) MB  FileVersion=$($v.FileVersion)  ProductVersion=$($v.ProductVersion)"
+            if (-not $v.ProductVersion.StartsWith('${{ steps.ver.outputs.version }}')) { throw "version mismatch: $($v.ProductVersion)" }
           }
 
       - name: Upload self-contained build

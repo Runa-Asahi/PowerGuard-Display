@@ -11,7 +11,9 @@ param(
     [string]$Configuration = "Release",
     [string]$Output = (Join-Path $PSScriptRoot "publish"),
     [switch]$SkipTests,
-    [switch]$Zip
+    [switch]$Zip,
+    # 版本号（不带 v）。为空时使用 csproj 中的 <Version>；CI 在打 tag 时传入 tag 对应的版本
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -27,23 +29,31 @@ if (-not $SkipTests) {
 }
 
 $proj = "src/PowerGuard.App/PowerGuard.App.csproj"
-$version = ([xml](Get-Content $proj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+$csprojVersion = ([xml](Get-Content $proj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+$version = if ($Version) { $Version.TrimStart('v') } else { $csprojVersion }
+if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') { throw "版本号格式不正确：$version" }
+$commit = (git rev-parse HEAD 2>$null)
+$verArgs = @("-p:Version=$version")
+if ($commit) { $verArgs += "-p:SourceRevisionId=$commit" }
+Write-Host "发布版本：$version（csproj：$csprojVersion，提交：$commit）"
 $sc = Join-Path $Output "win-x64"
 $fd = Join-Path $Output "win-x64-fd"
 
 dotnet publish $proj -c $Configuration -r win-x64 --self-contained true `
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
-    -p:DebugType=none -o $sc
+    -p:DebugType=none @verArgs -o $sc
 if ($LASTEXITCODE -ne 0) { throw "自包含发布失败（退出码 $LASTEXITCODE）" }
 
 dotnet publish $proj -c $Configuration -r win-x64 --self-contained false `
-    -p:PublishSingleFile=true -p:DebugType=none -o $fd
+    -p:PublishSingleFile=true -p:DebugType=none @verArgs -o $fd
 if ($LASTEXITCODE -ne 0) { throw "依赖框架发布失败（退出码 $LASTEXITCODE）" }
 
 foreach ($d in $sc, $fd) {
     $exe = Join-Path $d "PowerGuardDisplay.exe"
     $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-    Write-Host "发布完成：$exe（$size MB）" -ForegroundColor Green
+    $pv = (Get-Item $exe).VersionInfo.ProductVersion
+    if (-not $pv.StartsWith($version)) { throw "$exe 的 ProductVersion=$pv 与期望版本 $version 不一致" }
+    Write-Host "发布完成：$exe（$size MB，ProductVersion $pv）" -ForegroundColor Green
 }
 
 if ($Zip) {

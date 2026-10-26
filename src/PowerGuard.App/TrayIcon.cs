@@ -94,7 +94,7 @@ public sealed class TrayIcon : IDisposable
             RecoveryStatus.Normal => LoadIcon("ok", SystemIcons.Shield),
             _ => LoadIcon("warn", SystemIcons.Shield),
         };
-        var text = $"断电护屏 · {DisplayModeText.Of(s)}\n电源：{DisplayModeText.Of(snap.Power)}  显示：{DisplayModeText.Of(snap.Topology.Mode)}";
+        var text = $"断电护屏 v{AppVersion.Version} · {DisplayModeText.Of(s)}\n电源：{DisplayModeText.Of(snap.Power)}  显示：{DisplayModeText.Of(snap.Topology.Mode)}";
         _icon.Text = text.Length > 127 ? text[..127] : text;
 
         if (_lastStatus != null && _lastStatus != s)

@@ -22,7 +22,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        VersionText.Text = $"v{typeof(App).Assembly.GetName().Version?.ToString(3)}";
+        VersionText.Text = AppVersion.Display;
+        VersionText.ToolTip = $"断电护屏 {AppVersion.Display}\n{App.ExePath}";
+        Title = $"{Title} {AppVersion.Display}";
 
         // 集合本身按“新 → 旧”维护：新条目 Insert(0)、超量从末尾删除，不使用 SortDescription（避免每条日志都整体重排）
         foreach (var e in _app.Log.Recent.Reverse()) _logs.Add(e);

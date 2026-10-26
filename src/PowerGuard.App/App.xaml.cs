@@ -11,10 +11,14 @@ public partial class App : Application
 {
     private const string MutexName = @"Local\PowerGuardDisplay.SingleInstance";
     private const string ShowEventName = @"Local\PowerGuardDisplay.ShowWindow";
+    /// <summary>新版本启动时用它请求正在运行的实例正常退出（替换升级）。</summary>
+    private const string ExitEventName = @"Local\PowerGuardDisplay.ExitForUpgrade";
 
     private Mutex? _mutex;
     private EventWaitHandle? _showEvent;
     private RegisteredWaitHandle? _showWait;
+    private EventWaitHandle? _exitEvent;
+    private RegisteredWaitHandle? _exitWait;
     private Timer? _timer;
     private TrayIcon? _tray;
     private MainWindow? _window;
@@ -66,9 +70,9 @@ public partial class App : Application
     {
 
         _mutex = new Mutex(true, MutexName, out var first);
-        if (!first)
+        if (!first && !TryTakeOverFromOtherVersion())
         {
-            // 已有实例：通知其显示窗口后退出
+            // 已有同版本实例：通知其显示窗口后退出
             try { using var ev = EventWaitHandle.OpenExisting(ShowEventName); ev.Set(); } catch { }
             _mutex.Dispose(); _mutex = null;
             Shutdown(0);
@@ -76,12 +80,18 @@ public partial class App : Application
         }
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent, (_, _) => Dispatcher.BeginInvoke(ShowMainWindow), null, -1, false);
+        _exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ExitEventName);
+        _exitWait = ThreadPool.RegisterWaitForSingleObject(_exitEvent, (_, _) => Dispatcher.BeginInvoke(() =>
+        {
+            Log?.Log(LogCategory.App, "另一个版本的断电护屏请求替换本实例，正常退出（恢复标记已持久化）");
+            ExitApp();
+        }), null, -1, false);
 
         Directory.CreateDirectory(DataDir);
         Log = new FileLogger(LogDir);
         HookExceptions();
         var autostart = e.Args.Contains(StartupTaskService.AutostartArg);
-        Log.Log(LogCategory.App, $"程序启动 v{typeof(App).Assembly.GetName().Version}，Windows build {Environment.OSVersion.Version.Build}{(autostart ? "，由登录自启动任务启动" : "")}", LogResult.Success);
+        Log.Log(LogCategory.App, $"程序启动 {AppVersion.Display}（{ExePath}），Windows build {Environment.OSVersion.Version.Build}{(autostart ? "，由登录自启动任务启动" : "")}", LogResult.Success);
 
         SettingsStore = new SettingsStore(Path.Combine(DataDir, "settings.json"));
         var sr = SettingsStore.Load();
@@ -138,6 +148,44 @@ public partial class App : Application
         }
         else if (!autostart && Settings.ShowNotifications)
             _tray.Notify("断电护屏已在后台运行", "双击托盘图标打开控制台。");
+    }
+
+    /// <summary>
+    /// 已有实例在运行时：如果它是另一个版本（例如升级后旧版仍在托盘），询问用户是否替换。
+    /// 同意后先请求它正常退出（本版本起支持），旧版本不支持时再结束其进程。成功接管返回 true。
+    /// 背景：v1.2.0 及更早版本中，新 exe 只会唤醒旧实例的窗口然后自己退出，看起来就像“新版本还是旧界面”。
+    /// </summary>
+    private bool TryTakeOverFromOtherVersion()
+    {
+        try
+        {
+            var me = Environment.ProcessId;
+            var others = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ExePath))
+                .Where(p => p.Id != me && p.SessionId == Process.GetCurrentProcess().SessionId).ToList();
+            if (others.Count == 0) return false;
+            var other = others[0];
+            string? otherPath = null;
+            try { otherPath = other.MainModule?.FileName; } catch { }
+            var otherVersion = AppVersion.Of(otherPath);
+            var samePath = otherPath != null && string.Equals(Path.GetFullPath(otherPath), Path.GetFullPath(ExePath), StringComparison.OrdinalIgnoreCase);
+            if (otherVersion == AppVersion.Version && samePath) return false; // 同一个程序：照常唤醒窗口
+
+            var text = $"检测到另一个断电护屏正在运行：\n  版本：{(otherVersion is null ? "未知" : "v" + otherVersion)}\n  位置：{otherPath ?? "未知"}\n\n" +
+                       $"当前启动的是 {AppVersion.Display}：\n  位置：{ExePath}\n\n是否关闭正在运行的那个并改用当前版本？\n（未完成的恢复标记会保留，新版本会接着处理）";
+            if (MessageBox.Show(text, "断电护屏：替换正在运行的版本", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.Yes) != MessageBoxResult.Yes)
+                return false;
+
+            try { using var ev = EventWaitHandle.OpenExisting(ExitEventName); ev.Set(); } catch { /* 旧版本没有该事件 */ }
+            if (!other.WaitForExit(5000))
+            {
+                try { other.Kill(); other.WaitForExit(5000); } catch { }
+            }
+            try { if (_mutex!.WaitOne(TimeSpan.FromSeconds(5))) return true; }
+            catch (AbandonedMutexException) { return true; } // 旧进程被结束：互斥体被遗弃，已由本进程持有
+            MessageBox.Show("未能关闭正在运行的实例，请从托盘菜单“退出程序”后再运行。", "断电护屏", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+        catch { return false; }
     }
 
     private void Poll()
@@ -275,6 +323,8 @@ public partial class App : Application
         _timer?.Dispose();
         _showWait?.Unregister(null);
         _showEvent?.Dispose();
+        _exitWait?.Unregister(null);
+        _exitEvent?.Dispose();
         Monitor?.Dispose();
         _tray?.Dispose();
         Log.Dispose();
