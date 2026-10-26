@@ -106,6 +106,8 @@
                                 <CheckBox x:Name="SAutoSwitch" Content="断电（市电转电池）时自动切回笔记本内屏"/>
                                 <CheckBox x:Name="SAutoRestore" Content="来电后在外接显示器稳定可用时自动恢复首选模式"/>
                                 <CheckBox x:Name="SRestoreOnShutdown" Content="关机 / 重启 / 注销前尽力切回首选显示模式（仅在市电且检测到外接显示器时，最多约 4 秒，不会阻止关机）"/>
+                                <CheckBox x:Name="SRelaunch" Content="程序意外崩溃时自动重新启动（每小时最多 3 次）"/>
+                                <CheckBox x:Name="SVerifyDdc" Content="实验：恢复外接后用 DDC/CI 确认显示器真的有电，无应答则切回内屏继续等待（需显示器支持 DDC/CI）"/>
                                 <Grid Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <TextBlock Text="首选显示模式" VerticalAlignment="Center"/>

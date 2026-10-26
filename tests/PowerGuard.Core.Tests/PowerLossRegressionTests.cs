@@ -161,3 +161,159 @@ public class AlertTests
         Assert.True(h.C.Snapshot().GuardAttempts > RecoveryCoordinator.GuardFastAttempts);
     }
 }
+
+public sealed class FakeProbe : IMonitorProbe
+{
+    public Queue<MonitorResponse> Script { get; } = new();
+    public MonitorResponse Default { get; set; } = MonitorResponse.Responding;
+    public int Calls { get; private set; }
+    public MonitorResponse ProbeActiveExternal() { Calls++; return Script.Count > 0 ? Script.Dequeue() : Default; }
+}
+
+public class V12CoherenceTests
+{
+    private static (Harness h, FakeProbe p, RecoveryCoordinator c) WithProbe(bool enabled = true)
+    {
+        var h = new Harness();
+        h.Settings = h.Settings with { VerifyRestoreWithDdc = enabled };
+        var p = new FakeProbe();
+        var c = new RecoveryCoordinator(() => h.Settings, h.Store, h.Display, h.Display, h.Clock, new FakeDelay(h.Clock), h.Log, p);
+        return (h, p, c);
+    }
+
+    private static async Task Run(Harness h, RecoveryCoordinator c, int seconds)
+    {
+        for (var i = 0; i < seconds; i += 2) { h.Clock.Advance(TimeSpan.FromSeconds(2)); await c.TickAsync(); }
+    }
+
+    [Fact]
+    public async Task Ddc_Disabled_ByDefault_NeverProbed()
+    {
+        var (h, p, c) = WithProbe(enabled: false);
+        await c.InitializeAsync(PowerSource.Ac);
+        await Run(h, c, 120);
+        Assert.Equal(0, p.Calls);
+    }
+
+    [Fact]
+    public async Task Ddc_LearnedSupport_RestoreToDeadMonitor_RevertsOnce_ThenRestoresWithoutDdc()
+    {
+        var (h, p, c) = WithProbe();
+        await c.InitializeAsync(PowerSource.Ac);
+        await Run(h, c, 4);                         // 正常使用时学到支持 DDC
+        Assert.True(c.Snapshot().DdcSupported);
+        await c.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await c.OnPowerSourceChangedAsync(PowerSource.Ac);
+        p.Default = MonitorResponse.NotResponding;  // 显示器其实没电（EDID 仍在）
+        await Run(h, c, 20);
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+        Assert.Equal(RecoveryStatus.WaitingForExternal, c.Status);
+        Assert.NotNull(h.Store.State);
+        await Run(h, c, 30);                        // 本流程不再用 DDC 回退：回到已验证的行为
+        Assert.Equal(DisplayMode.External, h.Display.Mode);
+        Assert.Equal(RecoveryStatus.Normal, c.Status);
+    }
+
+    [Fact]
+    public async Task Ddc_UnsupportedOrInconclusive_DoesNotChangeBehavior()
+    {
+        var (h, p, c) = WithProbe();
+        p.Default = MonitorResponse.Unsupported;
+        await c.InitializeAsync(PowerSource.Ac);
+        await Run(h, c, 4);
+        Assert.False(c.Snapshot().DdcSupported);
+        await c.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await c.OnPowerSourceChangedAsync(PowerSource.Ac);
+        p.Default = MonitorResponse.NotResponding;
+        await Run(h, c, 30);
+        Assert.Equal(DisplayMode.External, h.Display.Mode); // 未确认支持：不使用 DDC 判定
+    }
+
+    [Fact]
+    public async Task LidClosed_GuardWaits_LidOpen_ReassertsImmediately()
+    {
+        var h = new Harness();
+        await h.C.InitializeAsync(PowerSource.Ac);
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await h.C.OnLidChangedAsync(false);
+        h.Display.Mode = DisplayMode.External;
+        var n = h.Display.Launches.Count;
+        await h.RunFor(30);
+        Assert.Equal(n, h.Display.Launches.Count);
+        Assert.Contains("盖子已合上", StatusText.Detail(h.C.Snapshot()));
+        await h.C.OnLidChangedAsync(true);
+        Assert.Equal(DisplayMode.Internal, h.Display.Mode);
+    }
+
+    [Fact]
+    public async Task Headline_IsConsistentAcrossStates()
+    {
+        var h = new Harness();
+        await h.C.InitializeAsync(PowerSource.Ac);
+        Assert.Equal("正常运行", StatusText.Headline(h.C.Snapshot()));
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        Assert.Equal("断电保护中（使用内屏）", StatusText.Headline(h.C.Snapshot()));
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Ac);
+        Assert.Equal("已来电，等待外接显示器", StatusText.Headline(h.C.Snapshot()));
+        await h.C.SetPausedAsync(true, TimeSpan.FromHours(1));
+        Assert.StartsWith("已暂停（", StatusText.Headline(h.C.Snapshot()));
+    }
+
+    [Fact]
+    public async Task ManualRestore_OnBattery_ClearsFlow_GuardDoesNotFightUser()
+    {
+        var h = new Harness();
+        await h.C.InitializeAsync(PowerSource.Ac);
+        await h.C.OnPowerSourceChangedAsync(PowerSource.Battery);
+        var r = await h.C.ManualRestorePreferredAsync(); // 用户明确要求（例如显示器接了 UPS）
+        Assert.True(r.Success);
+        var n = h.Display.Launches.Count;
+        await h.RunFor(60);
+        Assert.Equal(n, h.Display.Launches.Count);
+        Assert.Equal(DisplayMode.External, h.Display.Mode);
+    }
+
+    [Fact]
+    public void SettingsV2_MigratesToV3_WithSafeDefaults()
+    {
+        var s = System.Text.Json.JsonSerializer.Deserialize<AppSettings>("""{ "Version": 2, "RestoreOnShutdown": false }""", JsonFileStore<AppSettings>.Options)!;
+        Assert.True(s.Normalize());
+        Assert.Equal(3, s.Version);
+        Assert.False(s.VerifyRestoreWithDdc);
+        Assert.True(s.RelaunchAfterCrash);
+        Assert.False(s.RestoreOnShutdown);
+    }
+}
+
+public class CrashRelaunchPolicyTests
+{
+    [Fact]
+    public void AllowsThreePerHour()
+    {
+        var now = new DateTimeOffset(2026, 10, 27, 0, 0, 0, TimeSpan.FromHours(8));
+        var hist = new List<DateTimeOffset>();
+        for (var i = 0; i < 3; i++) { Assert.True(CrashRelaunchPolicy.ShouldRelaunch(hist, now)); hist.Add(now); now += TimeSpan.FromMinutes(5); }
+        Assert.False(CrashRelaunchPolicy.ShouldRelaunch(hist, now));
+        Assert.True(CrashRelaunchPolicy.ShouldRelaunch(hist, now + TimeSpan.FromHours(1)));
+    }
+}
+
+public class DdcManualTests
+{
+    [Fact]
+    public async Task Ddc_ManualRestore_IsNeverOverridden()
+    {
+        var h = new Harness();
+        h.Settings = h.Settings with { VerifyRestoreWithDdc = true };
+        var p = new FakeProbe();
+        var c = new RecoveryCoordinator(() => h.Settings, h.Store, h.Display, h.Display, h.Clock, new FakeDelay(h.Clock), h.Log, p);
+        await c.InitializeAsync(PowerSource.Ac);
+        for (var i = 0; i < 3; i++) { h.Clock.Advance(TimeSpan.FromSeconds(2)); await c.TickAsync(); }
+        await c.OnPowerSourceChangedAsync(PowerSource.Battery);
+        await c.OnPowerSourceChangedAsync(PowerSource.Ac);
+        p.Default = MonitorResponse.NotResponding;
+        var r = await c.ManualRestorePreferredAsync();
+        Assert.True(r.Success);
+        Assert.Equal(DisplayMode.External, h.Display.Mode);
+    }
+}

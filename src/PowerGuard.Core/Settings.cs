@@ -6,8 +6,8 @@ namespace PowerGuard.Core;
 /// </summary>
 public sealed record AppSettings
 {
-    /// <summary>当前配置结构版本。v1 → v2：新增 RestoreOnShutdown、SwitchMethod。</summary>
-    public const int CurrentVersion = 2;
+    /// <summary>当前配置结构版本。v1 → v2：新增 RestoreOnShutdown、SwitchMethod；v2 → v3：新增 VerifyRestoreWithDdc、RelaunchAfterCrash。</summary>
+    public const int CurrentVersion = 3;
 
     public int Version { get; set; } = CurrentVersion;
     public bool AutoSwitchOnPowerLoss { get; set; } = true;
@@ -34,6 +34,15 @@ public sealed record AppSettings
 
     /// <summary>关机 / 重启 / 注销前尽力切回首选显示模式（仅在安全时，见 ShutdownRestorePolicy）。</summary>
     public bool RestoreOnShutdown { get; set; } = true;
+
+    /// <summary>
+    /// 实验功能（默认关闭）：恢复外接后用 DDC/CI 确认显示器真的在应答；若连续无应答（显示器其实没电），切回内屏继续等待。
+    /// 只有在之前正常使用时读到过该显示器的 DDC 应答（确认支持）才会生效，每个恢复流程最多回退一次。
+    /// </summary>
+    public bool VerifyRestoreWithDdc { get; set; } = false;
+
+    /// <summary>程序意外崩溃时自动重新启动（每小时最多 3 次），保证断电保护不中断。</summary>
+    public bool RelaunchAfterCrash { get; set; } = true;
 
     public AppSettings Copy() => this with { };
 

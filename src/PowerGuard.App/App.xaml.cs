@@ -71,6 +71,12 @@ public partial class App : Application
     {
 
         _mutex = new Mutex(true, MutexName, out var first);
+        if (!first && e.Args.Contains("--after-crash"))
+        {
+            // 崩溃看门狗拉起：旧进程正在终止，等待其互斥体（被遗弃也算取得）
+            try { first = _mutex.WaitOne(TimeSpan.FromSeconds(15)); }
+            catch (AbandonedMutexException) { first = true; }
+        }
         if (!first && !TryTakeOverFromOtherVersion())
         {
             // 已有同版本实例：通知其显示窗口后退出
@@ -109,7 +115,7 @@ public partial class App : Application
         var topology = _topology = new DisplayTopologyProvider();
         var switcher = new DisplaySwitcher(Log, () => Settings);
         Coordinator = new RecoveryCoordinator(() => Settings, new RecoveryStateStore(Path.Combine(DataDir, "recovery-state.json")),
-            topology, switcher, new SystemClock(), new TaskDelay(), Log);
+            topology, switcher, new SystemClock(), new TaskDelay(), Log, new DdcMonitorProbe());
         StartupTasks = new StartupTaskService(new ProcessRunner(), SchtasksPath, DataDir);
 
         _tray = new TrayIcon(this);
@@ -119,6 +125,7 @@ public partial class App : Application
         // 先订阅再 Start：注册电源通知时 Windows 会立即推送一次当前值，不能丢
         Monitor = new SystemMonitor(Log);
         Monitor.PowerSourceChanged += p => Fire(() => Coordinator.OnPowerSourceChangedAsync(p));
+        Monitor.LidChanged += open => Fire(() => Coordinator.OnLidChangedAsync(open));
         // WM_DISPLAYCHANGE 不单独记日志：拓扑真正变化时协调器会记录，避免刷屏
         Monitor.DisplayChanged += () => { _topology?.InvalidateCache(); Fire(Coordinator.TickAsync); };
         Monitor.ResumedFromSleep += () =>
@@ -252,12 +259,36 @@ public partial class App : Application
             a.Handled = true; // 保持后台保护继续运行
         };
         AppDomain.CurrentDomain.UnhandledException += (_, a) =>
+        {
             Log.Log(LogCategory.Error, $"未处理的异常（终止={a.IsTerminating}）：{a.ExceptionObject}", LogResult.Failure);
+            if (a.IsTerminating) TryRelaunchAfterCrash();
+        };
         TaskScheduler.UnobservedTaskException += (_, a) =>
         {
             Log.Log(LogCategory.Error, $"未观察的任务异常：{a.Exception}", LogResult.Failure);
             a.SetObserved();
         };
+    }
+
+    /// <summary>崩溃看门狗：进程即将终止时重新启动自己（每小时最多 3 次）。新实例会等待互斥体被遗弃后接管。</summary>
+    private void TryRelaunchAfterCrash()
+    {
+        try
+        {
+            if (Settings?.RelaunchAfterCrash != true) return;
+            var hist = Path.Combine(DataDir, "crash-relaunch.txt");
+            var now = DateTimeOffset.Now;
+            if (!CrashRelaunchPolicy.ShouldRelaunch(CrashRelaunchPolicy.Load(hist), now))
+            {
+                Log.Log(LogCategory.Error, "一小时内已自动重启 3 次，不再自动重启", LogResult.Failure);
+                return;
+            }
+            CrashRelaunchPolicy.Append(hist, now);
+            try { _mutex?.ReleaseMutex(); } catch { }
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(ExePath, "--after-crash") { UseShellExecute = false });
+            Log.Log(LogCategory.App, "程序崩溃，已自动重新启动", LogResult.Warning);
+        }
+        catch { }
     }
 
     private void Fire(Func<Task> work)

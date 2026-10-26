@@ -25,6 +25,9 @@ internal static class NativeMethods
     /// <summary>GUID_ACDC_POWER_SOURCE：Data 为 DWORD，0=AC，1=DC（电池），2=短时电源（UPS）。</summary>
     public static readonly Guid GUID_ACDC_POWER_SOURCE = new("5d3e9a59-e9D5-4b00-a6bd-ff34ff516548");
 
+    /// <summary>GUID_LIDSWITCH_STATE_CHANGE：Data 为 DWORD，0=合上，1=打开。注册后 Windows 会立即推送一次当前状态。</summary>
+    public static readonly Guid GUID_LIDSWITCH_STATE_CHANGE = new("BA3E0F4D-B817-4094-A2D1-D56379E6A0F3");
+
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct POWERBROADCAST_SETTING
     {

@@ -12,7 +12,9 @@ public sealed record CoordinatorSnapshot(
     DateTimeOffset? ExternalStableSince,
     DateTimeOffset? WaitingOnAcSince,
     DateTimeOffset? PausedUntil = null,
-    int GuardAttempts = 0);
+    int GuardAttempts = 0,
+    bool? LidOpen = null,
+    bool DdcSupported = false);
 
 /// <summary>关机前切屏的执行结果（用于日志与测试）。</summary>
 public sealed record ShutdownRestoreOutcome(bool Attempted, bool Success, ShutdownDecision Decision, string Message);
@@ -52,6 +54,12 @@ public sealed class RecoveryCoordinator
     private DateTimeOffset? _pausedUntil;
     private DateTimeOffset? _lastGuardAt;
     private int _guardAttempts;
+    private bool? _lidOpen;
+    private bool _lidClosedLogged;
+    private readonly IMonitorProbe? _probe;
+    private bool _ddcSupported;
+    private bool _ddcUsedThisFlow;
+    private DateTimeOffset? _lastDdcLearnAt;
 
     /// <summary>断电期间内屏守护：两次重新切回内屏之间的最短间隔，连续失败后的退避间隔。</summary>
     public static readonly TimeSpan GuardInterval = TimeSpan.FromSeconds(5);
@@ -70,10 +78,10 @@ public sealed class RecoveryCoordinator
     }
 
     public RecoveryCoordinator(Func<AppSettings> settings, IRecoveryStateStore store, IDisplayTopologyProvider topology,
-        IDisplaySwitcher switcher, IClock clock, IDelay delay, IAppLogger log)
+        IDisplaySwitcher switcher, IClock clock, IDelay delay, IAppLogger log, IMonitorProbe? probe = null)
     {
         _settings = settings; _store = store; _topology = topology; _switcher = switcher;
-        _clock = clock; _delay = delay; _log = log;
+        _clock = clock; _delay = delay; _log = log; _probe = probe;
         _snapshot = BuildSnapshot();
     }
 
@@ -87,7 +95,7 @@ public sealed class RecoveryCoordinator
     public CoordinatorSnapshot Snapshot() => _snapshot;
 
     private CoordinatorSnapshot BuildSnapshot() => new(_paused ? RecoveryStatus.Paused : _flowStatus, Power, _lastTopology, _marker?.Copy(), _paused,
-        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince, _pausedUntil, _guardAttempts);
+        _lastEventAt, _lastEventText, _lastEventResult, _externalStableSince, _waitingOnAcSince, _pausedUntil, _guardAttempts, _lidOpen, _ddcSupported);
 
     /// <summary>发布新快照。只在持有 _gate（或构造期间）调用。</summary>
     private void Publish() => _snapshot = BuildSnapshot();
@@ -278,7 +286,7 @@ public sealed class RecoveryCoordinator
         // Windows 会按数据库中“内屏+外接”这组显示器上次的配置（仅第二屏幕）切回去。
         // 显式切一次内屏，并在断电期间持续守护（见 TickAsync），才能让内屏保持点亮。
         await SwitchToInternalCoreAsync(CancellationToken.None, force: true);
-        _lastGuardAt = _clock.Now; _guardAttempts = 0;
+        _lastGuardAt = _clock.Now; _guardAttempts = 0; _ddcUsedThisFlow = false;
         _waitingOnAcSince = Power == PowerSource.Ac ? _clock.Now : null;
         _externalStableSince = null;
         SetStatus(RecoveryStatus.WaitingForExternal);
@@ -334,6 +342,7 @@ public sealed class RecoveryCoordinator
         {
             var topo = QueryTopology();
             if (_paused && _pausedUntil is { } until && _clock.Now >= until) ResumeCore("暂停时间已到，自动恢复保护");
+            LearnDdcSupport(topo);
             if (!_paused && _marker is not null && _flowStatus == RecoveryStatus.RecoveryFailed && Power != PowerSource.Ac)
             {
                 await GuardInternalOnBatteryAsync(topo); // 恢复失败后又断电：同样守护内屏
@@ -392,6 +401,63 @@ public sealed class RecoveryCoordinator
         finally { ReleaseGate(); }
     }
 
+    // ───────────────────────── 盖子 / DDC ─────────────────────────
+
+    /// <summary>笔记本盖子状态变化（GUID_LIDSWITCH_STATE_CHANGE）。断电期间开盖时立即尝试切回内屏。</summary>
+    public async Task OnLidChangedAsync(bool open)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            if (_lidOpen == open) return;
+            _lidOpen = open; _lidClosedLogged = false;
+            _log.Log(LogCategory.Power, open ? "笔记本盖子已打开" : "笔记本盖子已合上");
+            if (open && Power != PowerSource.Ac && !_paused && _marker != null &&
+                _flowStatus is RecoveryStatus.WaitingForExternal or RecoveryStatus.RecoveryFailed)
+            {
+                _lastGuardAt = null; // 不受限速约束，立刻检查
+                await GuardInternalOnBatteryAsync(QueryTopology());
+            }
+        }
+        finally { ReleaseGate(); }
+    }
+
+    /// <summary>正常使用外接显示器时，每 60 秒尝试一次 DDC/CI，确认它是否支持（只在开启实验功能时）。</summary>
+    private void LearnDdcSupport(DisplayTopology topo)
+    {
+        if (_probe is null || _ddcSupported || !_settings().VerifyRestoreWithDdc) return;
+        if (_flowStatus != RecoveryStatus.Normal || Power != PowerSource.Ac || !topo.QuerySucceeded || topo.ExternalActiveCount == 0) return;
+        var now = _clock.Now;
+        if (_lastDdcLearnAt is { } last && now - last < TimeSpan.FromSeconds(60)) return;
+        _lastDdcLearnAt = now;
+        MonitorResponse r;
+        try { r = _probe.ProbeActiveExternal(); } catch { r = MonitorResponse.Unsupported; }
+        if (r == MonitorResponse.Responding)
+        {
+            _ddcSupported = true;
+            _log.Log(LogCategory.Display, "外接显示器支持 DDC/CI，恢复后将用它确认显示器真的在应答", LogResult.Success);
+            Changed();
+        }
+    }
+
+    /// <summary>
+    /// 恢复后确认外接显示器真的在应答。只在：开启实验功能、已确认支持 DDC、本流程尚未回退过、首选模式需要外接 时检查；
+    /// 3 次（间隔 2 秒）都明确“无应答”才判定为没电，任何“无法判断”都视为正常（回到已验证的行为）。
+    /// </summary>
+    private async Task<bool> ExternalReallyRespondingAsync(DisplayMode preferred, CancellationToken ct)
+    {
+        if (_probe is null || !_ddcSupported || _ddcUsedThisFlow || !_settings().VerifyRestoreWithDdc || !DisplaySwitchArgs.RequiresExternal(preferred)) return true;
+        for (var i = 0; i < 3; i++)
+        {
+            MonitorResponse r;
+            try { r = _probe.ProbeActiveExternal(); } catch { r = MonitorResponse.Unsupported; }
+            if (r != MonitorResponse.NotResponding) return true;
+            if (i < 2) await _delay.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+        _log.Log(LogCategory.Display, "恢复后外接显示器连续 3 次没有 DDC/CI 应答", LogResult.Warning);
+        return false;
+    }
+
     /// <summary>
     /// 断电期间的内屏守护：只要不是市电、存在恢复标记且内屏不在活动状态（或拓扑读不出来），就重新切回内屏。
     /// 限速：前 GuardFastAttempts 次至少间隔 GuardInterval，之后每 GuardBackoff 一次，避免与驱动来回拉扯。
@@ -400,6 +466,12 @@ public sealed class RecoveryCoordinator
     private async Task GuardInternalOnBatteryAsync(DisplayTopology topo)
     {
         if (topo.QuerySucceeded && topo.InternalActive) { _guardAttempts = 0; return; }
+        if (_lidOpen == false)
+        {
+            // 盖子合上时内屏无法点亮，反复切换没有意义；开盖时（OnLidChangedAsync）立即重试
+            if (!_lidClosedLogged) { _log.Log(LogCategory.Recovery, "内屏守护：笔记本盖子已合上，开盖后再切回内屏", LogResult.Warning); _lidClosedLogged = true; }
+            return;
+        }
         var now = _clock.Now;
         var interval = _guardAttempts >= GuardFastAttempts ? GuardBackoff : GuardInterval;
         if (_lastGuardAt is { } last && now - last < interval) return;
@@ -440,6 +512,15 @@ public sealed class RecoveryCoordinator
                     _log.Log(LogCategory.Switch, $"已调用 DisplaySwitch.exe 切换到{DisplayModeText.Of(preferred)}（第 {i} 次，退出码 {launch.ExitCode?.ToString() ?? "未知"}），等待校验");
                     await _delay.Delay(TimeSpan.FromSeconds(s.VerifyDelaySeconds), ct);
                     var t = QueryTopology();
+                    if (t.QuerySucceeded && t.Mode == preferred && automatic && !await ExternalReallyRespondingAsync(preferred, ct))
+                    {
+                        _ddcUsedThisFlow = true;
+                        RaiseAlert("外接显示器没有应答", "Windows 显示已切到外接，但显示器通过 DDC/CI 没有应答（可能其实没电），已切回内屏并继续等待。");
+                        await SwitchToInternalCoreAsync(CancellationToken.None, force: true);
+                        _externalStableSince = null;
+                        SetStatus(_marker != null ? RecoveryStatus.WaitingForExternal : RecoveryStatus.Normal);
+                        return new(false, "外接显示器没有应答，已切回内屏", "确认显示器已开机后再试；若误判，可在设置中关闭“用 DDC/CI 确认显示器”。");
+                    }
                     if (t.QuerySucceeded && t.Mode == preferred)
                     {
                         // 只有确认系统状态符合预期才清除标记

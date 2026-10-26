@@ -140,9 +140,11 @@ public partial class MainWindow : Window
             case RecoveryStatus.WaitingForExternal:
                 title = snap.Power != PowerSource.Ac ? "断电保护中：正在使用笔记本内屏" : "已来电：等待外接显示器";
                 if (snap.Power != PowerSource.Ac)
-                    detail = "当前未接市电。程序会一直保持内屏点亮（Windows 若把显示切回外接会自动切回来）" +
-                             (snap.GuardAttempts > 0 ? $"，本次已纠正 {snap.GuardAttempts} 次" : "") +
-                             "。来电后等外接显示器稳定再恢复。";
+                    detail = snap.LidOpen == false
+                        ? "当前未接市电，笔记本盖子已合上：开盖后会立即切回内屏。"
+                        : "当前未接市电。程序会一直保持内屏点亮（Windows 若把显示切回外接会自动切回来）" +
+                          (snap.GuardAttempts > 0 ? $"，本次已纠正 {snap.GuardAttempts} 次" : "") +
+                          "。来电后等外接显示器稳定再恢复。";
                 else if (!st.AutoRestoreOnPowerReturn) detail = "已来电，但自动恢复已禁用，请手动恢复。";
                 else if (snap.ExternalStableSince is { } since)
                 {
@@ -209,6 +211,8 @@ public partial class MainWindow : Window
         SNotify.IsChecked = s.ShowNotifications;
         SRetainLogs.IsChecked = s.RetainLogs;
         SRestoreOnShutdown.IsChecked = s.RestoreOnShutdown;
+        SRelaunch.IsChecked = s.RelaunchAfterCrash;
+        SVerifyDdc.IsChecked = s.VerifyRestoreWithDdc;
         SStability.Text = s.StabilitySeconds.ToString();
         STimeout.Text = s.RecoveryTimeoutMinutes.ToString();
         SRetryInterval.Text = s.RetryIntervalSeconds.ToString();
@@ -234,6 +238,8 @@ public partial class MainWindow : Window
         n.ShowNotifications = SNotify.IsChecked == true;
         n.RetainLogs = SRetainLogs.IsChecked == true;
         n.RestoreOnShutdown = SRestoreOnShutdown.IsChecked == true;
+        n.RelaunchAfterCrash = SRelaunch.IsChecked == true;
+        n.VerifyRestoreWithDdc = SVerifyDdc.IsChecked == true;
         if (ReadInt(SStability, 3, 600, "稳定等待时间", errors, out var a)) n.StabilitySeconds = a;
         if (ReadInt(STimeout, 1, 1440, "恢复超时时间", errors, out var b)) n.RecoveryTimeoutMinutes = b;
         if (ReadInt(SRetryInterval, 5, 3600, "重试间隔", errors, out var c)) n.RetryIntervalSeconds = c;

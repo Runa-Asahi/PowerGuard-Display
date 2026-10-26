@@ -15,6 +15,9 @@ public sealed class SystemMonitor : IDisposable
     private readonly IAppLogger _log;
     private HwndSource? _source;
     private IntPtr _powerNotify;
+    private IntPtr _lidNotify;
+    /// <summary>盖子状态：true=打开。没有盖子传感器的设备不会触发。</summary>
+    public event Action<bool>? LidChanged;
 
     public event Action<PowerSource>? PowerSourceChanged;
     public event Action? DisplayChanged;
@@ -58,6 +61,8 @@ public sealed class SystemMonitor : IDisposable
             _log.Log(LogCategory.Power, $"RegisterPowerSettingNotification 失败（错误码 {Marshal.GetLastWin32Error()}），改为依赖 PBT_APMPOWERSTATUSCHANGE 与低频轮询", LogResult.Failure);
         else
             _log.Log(LogCategory.Power, "已注册 GUID_ACDC_POWER_SOURCE 电源通知", LogResult.Success);
+        var lid = GUID_LIDSWITCH_STATE_CHANGE;
+        _lidNotify = RegisterPowerSettingNotification(_source.Handle, ref lid, DEVICE_NOTIFY_WINDOW_HANDLE); // 失败不影响核心功能
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -81,6 +86,8 @@ public sealed class SystemMonitor : IDisposable
                             }
                             else PowerSourceChanged?.Invoke(src);
                         }
+                        else if (s.PowerSetting == GUID_LIDSWITCH_STATE_CHANGE && s.DataLength >= 4)
+                            LidChanged?.Invoke(s.Data != 0);
                     }
                     else if (evt == PBT_APMPOWERSTATUSCHANGE)
                     {
@@ -146,6 +153,7 @@ public sealed class SystemMonitor : IDisposable
                 _log.Log(LogCategory.Power, $"UnregisterPowerSettingNotification 失败（{Marshal.GetLastWin32Error()}）", LogResult.Warning);
             _powerNotify = IntPtr.Zero;
         }
+        if (_lidNotify != IntPtr.Zero) { UnregisterPowerSettingNotification(_lidNotify); _lidNotify = IntPtr.Zero; }
         _source?.RemoveHook(WndProc);
         _source?.Dispose();
         _source = null;

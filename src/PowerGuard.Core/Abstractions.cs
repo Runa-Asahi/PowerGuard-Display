@@ -36,3 +36,13 @@ public interface IProcessRunner
     /// <summary>以参数数组启动进程（不经过 shell 拼接）。</summary>
     Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> args, TimeSpan timeout, CancellationToken ct = default);
 }
+
+/// <summary>外接显示器通过 DDC/CI 的应答情况。Unsupported = 无法判断（未接、不支持 DDC、接口出错）。</summary>
+public enum MonitorResponse { Unsupported, Responding, NotResponding }
+
+/// <summary>
+/// 独立于 Windows 显示拓扑（可能因显示器断电后仍保留 EDID 而“过时”）的显示器探测。
+/// 真实实现：对当前活动的外接显示器读取 DDC/CI VCP 0xD6（电源模式），显示器真正断电时 I²C 不会应答。
+/// 只能探测处于活动状态（有桌面输出）的外接显示器。
+/// </summary>
+public interface IMonitorProbe { MonitorResponse ProbeActiveExternal(); }
